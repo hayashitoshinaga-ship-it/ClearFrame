@@ -1,6 +1,7 @@
 # Install the matched PyTorch/torchvision wheel pair with Setup-ClearFrame.cmd.
-numpy>=1.26,<3
-pillow>=11,<13
-spandrel>=0.4,<0.5
-opencv-python-headless>=4.10,<5
-psutil>=6,<8
+# Validated on Windows x64, Python 3.10; keep the primary runtime reproducible.
+numpy==2.2.6
+pillow==12.3.0
+spandrel==0.4.2
+opencv-python-headless==4.14.0.94
+psutil==7.2.2

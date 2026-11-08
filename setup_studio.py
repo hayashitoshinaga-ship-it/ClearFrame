@@ -30,7 +30,8 @@ def main():
     cuda = not args.cpu and shutil.which("nvidia-smi") is not None
     wheel = "cu128" if cuda else "cpu"
     print(f"Installing PyTorch 2.7.1 ({wheel}). The GPU package is several GB.", flush=True)
-    run([python, "-m", "pip", "install", "torch==2.7.1", "torchvision==0.22.1",
+    # Exact local build tags make rerunning --cpu / GPU setup actually switch wheels.
+    run([python, "-m", "pip", "install", f"torch==2.7.1+{wheel}", f"torchvision==0.22.1+{wheel}",
          "--index-url", f"https://download.pytorch.org/whl/{wheel}"])
     run([python, "-m", "pip", "install", "-r", ROOT / "requirements-studio.txt"])
     run([python, "-c", "import torch, cv2, spandrel, PIL, psutil; print('ClearFrame dependencies ready. GPU available:', torch.cuda.is_available())"])

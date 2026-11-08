@@ -57,6 +57,8 @@
 
 详见[使用说明](docs/USER_GUIDE.md)。当前界面不包含上游的局部保护笔刷或套索；上游旧入口仍保留在源码中，使用本工作台请打开 `Start-ClearFrame.cmd`。
 
+已完成的功能检查、RTX 5090 实测耗时及验证边界见[验证记录](docs/VALIDATION.md)。
+
 ## 来源与许可
 
 本项目基于 CXP-2024/gpt-anime-denoise 的提交 `a5005a82f70d1d7c79145968c7c64906b283eb18`，保留上游算法核心与 MIT [LICENSE](LICENSE)。派生仓库为 [hayashitoshinaga-ship-it/ClearFrame](https://github.com/hayashitoshinaga-ship-it/ClearFrame)。
