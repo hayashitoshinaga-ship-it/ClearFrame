@@ -24,7 +24,7 @@
   };
   const icon = (name, extra = '') => `<svg viewBox="0 0 24 24" aria-hidden="true" class="${extra}">${paths[name] || paths.image}</svg>`;
   function hydrateIcons(scope = document) { scope.querySelectorAll('[data-icon]').forEach(el => { el.innerHTML = icon(el.dataset.icon); }); }
-  const state = {config: null, draft: null, items: [], selectedId: null, view: 'original', zoom: 'fit', split: 50, scale: 1, connected: false, stopped: false, closing: false, shutdownWait: null, pendingFiles: [], importing: false, polling: false, hardwarePolling: false, batchStarting: false, batchCancelled: false, hardware: null, outputSaving: false, outputOpening: false, exporting: false, exportOpening: false, lastExport: null};
+  const state = {config: null, draft: null, items: [], selectedId: null, view: 'original', zoom: 'fit', split: 50, scale: 1, connected: false, stopped: false, closing: false, shutdownWait: null, pendingFiles: [], importing: false, polling: false, hardwarePolling: false, batchStarting: false, batchMode: null, batchCancelled: false, clearing: false, hardware: null, outputSaving: false, outputOpening: false, exporting: false, exportOpening: false, lastExport: null};
   const halted = () => state.stopped || state.closing;
   // Hold in-flight responses while shutdown is undecided. A failed shutdown can
   // resume the same requests; a successful shutdown discards their late results.
@@ -112,13 +112,13 @@
     $('strengthCaution').textContent = amount === 0 ? '强度为 0 时，导出保留原始像素的 PNG，不执行处理步骤。' : photo ? '人像皮肤、发丝和风景纹理容易被抹平，建议从较低强度开始。' : '更高强度会减少细碎纹理，也可能损失淡阴影、细线与笔触。';
   }
   function changeSettings(change, full = true) {
-    const current = settings(); if (!current) return;
+    const current = settings(); if (!current || state.clearing) return;
     Object.assign(current, change);
     if (full) renderSettings(); else renderStrength();
     renderViewer(); renderActions(); renderQueue();
   }
   function renderDownload() {
-    const item = selected(), available = Boolean(item?.lastResult) && state.connected && !halted();
+    const item = selected(), available = Boolean(item?.lastResult) && state.connected && !halted() && !state.clearing;
     $('downloadButton').classList.toggle('disabled', !available);
     $('downloadButton').setAttribute('aria-disabled', String(!available));
     if (available) {
@@ -127,13 +127,23 @@
     } else $('downloadButton').removeAttribute('href');
   }
   function renderActions() {
-    const item = selected(), unavailable = !state.config || !state.connected || halted();
+    const item = selected(), unavailable = !state.config || !state.connected || halted() || state.clearing;
     ['importButton', 'emptyImportButton', 'queueImportButton'].forEach(id => { $(id).disabled = unavailable; });
     $('startButton').disabled = unavailable || !item || active(item) || state.batchStarting;
     $('startButton').querySelector('span:last-child').textContent = state.stopped ? '服务已关闭' : item && active(item) ? (item.status === 'queued' ? '已加入处理队列' : '正在处理当前图片') : item?.lastResult ? '用当前参数重新处理' : '处理当前图片';
     const available = state.items.filter(item => !active(item)).length;
     $('batchButton').disabled = unavailable || !available || state.batchStarting;
-    $('batchButton').textContent = state.batchStarting ? '正在加入队列…' : `处理全部图片${state.items.length ? `（${available}）` : ''}`;
+    $('batchButton').textContent = state.batchStarting && state.batchMode === 'individual' ? '正在按各图参数提交…' : `按各图参数处理全部${state.items.length ? `（${available}）` : ''}`;
+    const uniformBusy = state.batchStarting || state.importing || state.items.some(active);
+    $('uniformBatchButton').disabled = unavailable || !item || uniformBusy;
+    $('uniformBatchButton').textContent = state.batchStarting && state.batchMode === 'uniform' ? '正在用统一参数提交…' : '用当前参数处理全部图片';
+    $('uniformBatchButton').title = state.importing ? '图片正在导入，请稍候再统一处理。' : uniformBusy ? '请等待所有任务结束后再统一参数，避免覆盖正在处理的设置。' : '复制当前图片的全部设置，应用到每张图片并重新处理，包括已有结果的图片。';
+    const clearWait = clearQueueWaitReason();
+    $('clearQueueButton').disabled = unavailable || !state.items.length || Boolean(clearWait);
+    $('clearQueueButton').title = clearWait || '取消尚未完成的任务并清空队列；保留原图与已保存结果。';
+    $('confirmClearQueue').disabled = unavailable || !state.items.length || Boolean(clearWait);
+    $('confirmClearQueue').textContent = state.clearing ? '正在取消并清空…' : '确认清空';
+    $('cancelClearQueue').disabled = state.clearing;
     $('cancelAllButton').hidden = state.stopped || !state.items.some(active);
     $('cancelAllButton').disabled = unavailable;
     if ($('shutdownButton')) $('shutdownButton').disabled = !state.connected || halted();
@@ -174,7 +184,7 @@
       });
       return;
     }
-    const signature = JSON.stringify([state.selectedId, state.batchStarting, state.stopped, state.items.map(item => [item.id, item.name, item.source_url, item.status, stale(item)])]);
+    const signature = JSON.stringify([state.selectedId, state.batchStarting, state.clearing, state.stopped, state.items.map(item => [item.id, item.name, item.source_url, item.status, stale(item)])]);
     if (signature === lastQueueRender) return;
     lastQueueRender = signature;
     const scroll = $('imageQueue').scrollLeft;
@@ -187,7 +197,7 @@
     $('imageQueue').innerHTML = state.items.map(item => {
       const status = state.stopped && active(item) ? '已停止' : item.status === 'completed' && stale(item) ? '参数已修改' : statusNames[item.status] || item.status;
       const statusIcon = active(item) && !state.stopped ? icon('loader', 'spinner') : item.status === 'completed' ? icon('check') : icon('clock');
-      return `<div class="queue-item${item.id === state.selectedId ? ' selected' : ''}" data-image-id="${escape(item.id)}" role="button" tabindex="0" aria-pressed="${item.id === state.selectedId}" aria-label="${escape(item.name)}, ${escape(status)}"><img class="queue-thumb" src="${escape(item.source_url)}" alt="" loading="lazy" draggable="false"><div class="queue-file"><strong title="${escape(item.name)}">${escape(item.name)}</strong><span class="queue-status ${escape(item.status)}">${statusIcon}${escape(status)}</span></div><button class="queue-remove" data-remove="${escape(item.id)}" ${active(item) || state.batchStarting ? 'disabled' : ''} title="从队列移除" aria-label="移除 ${escape(item.name)}">${icon('x')}</button></div>`;
+      return `<div class="queue-item${item.id === state.selectedId ? ' selected' : ''}" data-image-id="${escape(item.id)}" role="button" tabindex="0" aria-pressed="${item.id === state.selectedId}" aria-label="${escape(item.name)}, ${escape(status)}"><img class="queue-thumb" src="${escape(item.source_url)}" alt="" loading="lazy" draggable="false"><div class="queue-file"><strong title="${escape(item.name)}">${escape(item.name)}</strong><span class="queue-status ${escape(item.status)}">${statusIcon}${escape(status)}</span></div><button class="queue-remove" data-remove="${escape(item.id)}" ${active(item) || state.batchStarting || state.clearing ? 'disabled' : ''} title="从队列移除" aria-label="移除 ${escape(item.name)}">${icon('x')}</button></div>`;
     }).join('');
     $('imageQueue').scrollLeft = scroll;
   }
@@ -208,7 +218,7 @@
     $('taskElapsed').textContent = job ? `已用时 ${niceTime(job.elapsed_seconds)}` : '尚未运行';
     $('taskDevice').textContent = deviceName(job?.actual_device);
     $('cancelButton').hidden = state.stopped || !item || !['queued', 'running'].includes(status);
-    $('cancelButton').disabled = halted() || !state.connected || Boolean(item?.cancelling);
+    $('cancelButton').disabled = halted() || state.clearing || !state.connected || Boolean(item?.cancelling);
     $('cancelButton').textContent = item?.cancelling ? '取消中' : '取消';
     const error = state.stopped ? null : item?.localError || job?.error || item?.pollError;
     $('taskError').hidden = !error;
@@ -283,7 +293,7 @@
   }
   function renderAll() { renderSettings(); renderQueue(); renderTask(); renderViewer(); renderActions(); }
   function selectImage(id) {
-    if (halted() || !state.items.some(item => item.id === id)) return;
+    if (halted() || state.clearing || !state.items.some(item => item.id === id)) return;
     state.selectedId = id; state.zoom = 'fit';
     if (selected().lastResult) state.view = 'compare'; else state.view = 'original';
     $('viewport').scrollTop = 0; $('viewport').scrollLeft = 0; renderAll();
@@ -295,10 +305,11 @@
     }
   }
   async function importFiles(files) {
+    if (state.clearing) return toast('正在清空队列，请稍候再导入。');
     if (!state.connected || !state.config || halted()) return toast(state.stopped ? '本地服务已关闭，请重新运行启动器。' : '请先连接本地处理程序。', true);
     state.pendingFiles.push(...Array.from(files).map(file => ({file, settings: copy(settings())})));
     if (state.importing) return;
-    state.importing = true; document.body.classList.add('loading-import');
+    state.importing = true; document.body.classList.add('loading-import'); renderActions();
     let count = 0;
     while (state.pendingFiles.length) {
       if (!(await mayUpdate())) break;
@@ -318,37 +329,89 @@
     renderActions();
   }
   async function startItem(item, snapshot = copy(item.settings)) {
-    if (active(item) || halted()) return;
+    if (active(item) || halted() || state.clearing || !state.items.includes(item)) return;
     item.status = 'submitting'; item.localError = null; item.pollError = null; item.job = null; item.cancelling = false; item.cancelWhenSubmitted = false;
     renderQueue(); renderTask(); renderActions();
     try {
       const job = await api('/api/jobs', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({image_id:item.id,...snapshot})});
-      if (!(await mayUpdate())) return;
+      if (!(await mayUpdate()) || !state.items.includes(item)) return;
       item.job = {...job, progress:0, elapsed_seconds:0, settings:snapshot}; item.status = job.status || 'queued';
       if (item.cancelWhenSubmitted) { item.cancelWhenSubmitted = false; await cancelItem(item); }
       pollJobs();
-    } catch (error) { if (!(await mayUpdate())) return; item.status = 'failed'; item.localError = error.message; toast(`${item.name}：${error.message}`, true); }
+    } catch (error) { if (!(await mayUpdate()) || !state.items.includes(item)) return; item.status = 'failed'; item.localError = error.message; toast(`${item.name}：${error.message}`, true); }
     if (!(await mayUpdate())) return;
     renderQueue(); renderTask(); renderActions();
   }
-  async function startAll() {
-    if (state.batchStarting || halted()) return;
-    const batch = state.items.filter(item => !active(item)).map(item => ({item, snapshot:copy(item.settings)}));
-    state.batchStarting = true; state.batchCancelled = false; renderActions(); renderQueue();
+  async function startAll(useCurrent = false) {
+    if (state.batchStarting || halted() || state.clearing) return;
+    if (useCurrent && (!selected() || state.importing || state.items.some(active))) return toast('请等待导入与当前任务全部结束后，再使用统一参数。');
+    const common = useCurrent ? copy(selected().settings) : null;
+    const batch = state.items.filter(item => !active(item)).map(item => {
+      if (common) item.settings = copy(common);
+      return {item, snapshot:copy(item.settings)};
+    });
+    state.batchStarting = true; state.batchMode = useCurrent ? 'uniform' : 'individual'; state.batchCancelled = false; renderActions(); renderQueue(); renderViewer();
     for (const {item, snapshot} of batch) { if (state.stopped || state.batchCancelled) break; if (state.items.includes(item)) await startItem(item, snapshot); }
-    state.batchStarting = false;
+    state.batchStarting = false; state.batchMode = null;
     if (!(await mayUpdate())) return;
     renderActions(); renderQueue();
   }
   async function cancelItem(item) {
-    if (halted()) return;
+    if (halted() || state.clearing || !state.items.includes(item)) return;
     if (item?.status === 'submitting') { item.cancelWhenSubmitted = true; renderTask(); return; }
     if (!item?.job || !active(item) || item.cancelling) return;
     item.cancelling = true; renderTask();
     try { await api(`/api/jobs/${encodeURIComponent(item.job.id)}/cancel`, {method:'POST'}); }
-    catch (error) { if (!(await mayUpdate())) return; item.cancelling = false; item.localError = error.message; toast(error.message, true); }
-    if (!(await mayUpdate())) return;
+    catch (error) { if (!(await mayUpdate()) || !state.items.includes(item)) return; item.cancelling = false; item.localError = error.message; toast(error.message, true); }
+    if (!(await mayUpdate()) || !state.items.includes(item)) return;
     renderTask(); pollJobs();
+  }
+  function clearQueueWaitReason() {
+    if (state.importing || state.pendingFiles.length) return '图片正在导入，请稍候再清空队列。';
+    if (state.batchStarting || state.items.some(item => item.status === 'submitting')) return '处理任务正在提交，请等待提交完成后再清空队列。';
+    return '';
+  }
+  function showClearQueueDialog() {
+    if (halted() || state.clearing || !state.connected || !state.items.length) return;
+    const wait = clearQueueWaitReason();
+    if (wait) return toast(wait);
+    $('clearQueueError').hidden = true;
+    $('clearQueueDetail').textContent = `将取消尚未完成的任务，并从队列移除全部 ${state.items.length} 张图片。原图与已经保存的结果会保留，当前参数会保留供下一批使用。`;
+    $('clearQueueDialog').showModal();
+  }
+  async function clearQueue() {
+    if (state.clearing) return;
+    const wait = clearQueueWaitReason();
+    if (halted() || !state.connected || wait) {
+      $('clearQueueError').textContent = wait || '请等待本地服务连接恢复后再清空。';
+      $('clearQueueError').hidden = false; return;
+    }
+    if (!state.items.length) { $('clearQueueDialog').close(); return; }
+    state.batchCancelled = true; state.clearing = true;
+    const preservedSettings = copy(settings());
+    const pending = state.items.filter(item => ['queued','running'].includes(item.status) && item.job).map(item => ({item, jobId:item.job.id}));
+    $('clearQueueError').hidden = true; clearDrag(); renderActions(); renderQueue(); renderTask();
+    try {
+      const responses = await Promise.allSettled(pending.map(async ({jobId}) => {
+        const result = await api(`/api/jobs/${encodeURIComponent(jobId)}/cancel`, {method:'POST'});
+        if (result.ok !== true) throw new Error('本地程序未确认取消请求。');
+      }));
+      if (!(await mayUpdate())) return;
+      const failures = responses.map((response, index) => response.status === 'rejected' ? `${pending[index].item.name}：${response.reason?.message || '取消失败'}` : null).filter(Boolean);
+      if (failures.length) throw new Error(`有 ${failures.length} 个任务未能确认取消。\n${failures.slice(0, 3).join('\n')}\n队列已保留，部分任务可能已停止，可以重试。`);
+      state.draft = preservedSettings; state.items = []; state.selectedId = null; state.lastExport = null;
+      state.pendingFiles.length = 0; state.view = 'original'; state.zoom = 'fit'; state.split = 50;
+      $('sourceImage').removeAttribute('src'); $('resultImage').removeAttribute('src');
+      $('imageQueue').scrollLeft = 0; $('viewport').scrollLeft = 0; $('viewport').scrollTop = 0;
+      $('clearQueueDialog').close(); renderAll();
+      toast('队列已清空，未完成任务已请求取消；原图与已保存结果保留。');
+    } catch (error) {
+      if (!(await mayUpdate())) return;
+      $('clearQueueError').textContent = error.message; $('clearQueueError').hidden = false;
+    } finally {
+      state.clearing = false;
+      if (await mayUpdate()) { renderActions(); renderQueue(); renderTask(); }
+    }
   }
   async function pollJobs() {
     if (state.polling || halted()) return;
@@ -358,16 +421,16 @@
     await Promise.all(waiting.map(async item => {
       try {
         const job = await api(`/api/jobs/${encodeURIComponent(item.job.id)}`);
-        if (!(await mayUpdate())) return;
-        if (item.job.id !== job.id) return;
+        if (!(await mayUpdate()) || !state.items.includes(item)) return;
+        if (item.job?.id !== job.id) return;
         item.pollError = null; item.job = {...item.job,...job}; item.status = job.status;
         if (!active(item)) item.cancelling = false;
         if (job.status === 'completed' && job.result_url && item.lastResult?.id !== job.id) {
           item.lastResult = {id:job.id,result_url:job.result_url,download_url:job.download_url,result_name:job.result_name,settings:copy(job.settings || item.job.settings),elapsed_seconds:job.elapsed_seconds,actual_device:job.actual_device};
           if (item.id === state.selectedId) { state.view = 'compare'; renderViewer(); }
-          toast(`${item.name} 处理完成，用时 ${niceTime(job.elapsed_seconds)}。`);
+          if (!state.clearing) toast(`${item.name} 处理完成，用时 ${niceTime(job.elapsed_seconds)}。`);
         }
-      } catch (error) { if (!(await mayUpdate())) return; item.pollError = `任务状态暂时无法读取。${error.message} 恢复连接后将继续更新。`; }
+      } catch (error) { if (!(await mayUpdate()) || !state.items.includes(item)) return; item.pollError = `任务状态暂时无法读取。${error.message} 恢复连接后将继续更新。`; }
     }));
     state.polling = false;
     if (!(await mayUpdate())) return;
@@ -445,7 +508,7 @@
     }
   }
   function showExportDialog() {
-    if (halted()) return;
+    if (halted() || !state.lastExport) return;
     const existing = document.querySelector('dialog[open]');
     if (existing && existing !== $('exportDialog')) {
       existing.addEventListener('close', showExportDialog, {once:true}); return;
@@ -453,12 +516,13 @@
     if (!$('exportDialog').open) $('exportDialog').showModal();
   }
   async function exportLatest() {
-    if (halted() || !state.connected || state.exporting || !state.items.some(item => item.lastResult)) return;
+    if (halted() || state.clearing || !state.connected || state.exporting || !state.items.some(item => item.lastResult)) return;
     const imageIds = state.items.map(item => item.id);
     state.exporting = true; renderActions();
     try {
       const result = await api('/api/exports', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({image_ids:imageIds})});
       if (!(await mayUpdate())) return;
+      if (!imageIds.some(id => state.items.some(item => item.id === id))) return;
       state.lastExport = result;
       $('exportCount').textContent = result.count;
       $('exportSkipped').textContent = result.skipped.length;
@@ -467,6 +531,7 @@
       showExportDialog();
     } catch (error) {
       if (!(await mayUpdate())) return;
+      if (!imageIds.some(id => state.items.some(item => item.id === id))) return;
       toast(`导出未完成：${error.message}`, true);
     } finally {
       state.exporting = false;
@@ -505,11 +570,16 @@
   $('strength').addEventListener('input', event => changeSettings({strength:Number(event.target.value)}, false));
   $('device').addEventListener('change', event => changeSettings({device:event.target.value}, false));
   $('startButton').addEventListener('click', () => { const item = selected(); if (item) startItem(item); });
-  $('batchButton').addEventListener('click', startAll);
+  $('batchButton').addEventListener('click', () => startAll(false));
+  $('uniformBatchButton').addEventListener('click', () => startAll(true));
+  $('clearQueueButton').addEventListener('click', showClearQueueDialog);
+  $('confirmClearQueue').addEventListener('click', clearQueue);
+  $('cancelClearQueue').addEventListener('click', () => $('clearQueueDialog').close());
+  $('clearQueueDialog').addEventListener('cancel', event => { if (state.clearing) event.preventDefault(); });
   $('cancelButton').addEventListener('click', () => cancelItem(selected()));
   $('cancelAllButton').addEventListener('click', async () => { state.batchCancelled = true; for (const item of state.items.filter(active)) await cancelItem(item); });
   $('imageQueue').addEventListener('click', event => {
-    if (halted()) return;
+    if (halted() || state.clearing) return;
     const remove = event.target.closest('[data-remove]');
     if (remove) {
       const item = state.items.find(item => item.id === remove.dataset.remove); if (!item || active(item) || state.batchStarting) return;
@@ -555,16 +625,16 @@
   const hasDraggedFiles = event => Array.from(event.dataTransfer?.types || []).includes('Files');
   document.addEventListener('dragover', event => {
     event.preventDefault(); // Never let a file, image URI, or link navigate away.
-    if (event.dataTransfer) event.dataTransfer.dropEffect = hasDraggedFiles(event) && !halted() ? 'copy' : 'none';
+    if (event.dataTransfer) event.dataTransfer.dropEffect = hasDraggedFiles(event) && !halted() && !state.clearing ? 'copy' : 'none';
   });
   document.addEventListener('drop', event => {
     event.preventDefault(); clearDrag();
-    if (halted()) return;
+    if (halted() || state.clearing) return;
     const files = Array.from(event.dataTransfer?.files || []);
     if (files.length) importFiles(files);
     else if (event.dataTransfer?.types.length) toast('请从电脑拖入图片文件，暂不支持拖入网页链接或文件夹。');
   });
-  document.addEventListener('dragenter', event => { if (hasDraggedFiles(event) && !halted()) { dragDepth++; $('dragOverlay').hidden = false; } });
+  document.addEventListener('dragenter', event => { if (hasDraggedFiles(event) && !halted() && !state.clearing) { dragDepth++; $('dragOverlay').hidden = false; } });
   document.addEventListener('dragleave', () => { dragDepth = Math.max(0, dragDepth - 1); if (!dragDepth) $('dragOverlay').hidden = true; });
   document.addEventListener('dragend', clearDrag);
   window.addEventListener('blur', clearDrag);

@@ -29,7 +29,7 @@
         <section class="settings-section intensity-section"><div class="section-heading"><h2><span class="step-number">03</span>处理强度</h2><output class="strength-value" id="strengthValue" for="strength">50 <span>/ 100</span></output></div><label class="sr-only" for="strength">处理强度</label><input type="range" id="strength" min="0" max="100" step="1" value="50" disabled><div class="range-labels"><span>保留原图</span><span id="strengthHint">适中</span><span>更强</span></div><p class="small-note" id="strengthCaution">强度越高，细碎纹理减少越多，也可能损失淡阴影与细节。</p></section>
         <section class="settings-section device-section"><div class="section-heading"><h2><span class="step-number">04</span>计算设备</h2></div><label class="sr-only" for="device">计算设备</label><select id="device" disabled><option value="auto">自动选择</option><option value="cuda">NVIDIA GPU</option><option value="cpu">CPU</option></select><p class="small-note">不同步骤可能使用不同设备，以任务状态显示为准。</p></section>
       </div>
-      <div class="settings-actions"><button class="button button-primary button-full" id="startButton" disabled><span data-icon="play"></span><span>处理当前图片</span></button><button class="button button-secondary button-full" id="batchButton" disabled>处理全部图片</button><p>导入与调整参数不会自动处理</p></div>
+      <div class="settings-actions"><button class="button button-primary button-full" id="startButton" disabled><span data-icon="play"></span><span>处理当前图片</span></button><button class="button button-secondary button-full uniform-batch-button" id="uniformBatchButton" disabled>用当前参数处理全部图片</button><button class="button button-secondary button-full" id="batchButton" disabled>按各图参数处理全部</button><p>导入与调整参数不会自动处理</p></div>
     </aside>
 
     <section class="workspace" aria-label="图片预览与对比">
@@ -44,7 +44,7 @@
         <div class="canvas-status"><span id="viewStatus"><span class="quiet-dot"></span>等待导入</span><span id="staleStatus" hidden><span data-icon="clock"></span>参数已修改，当前显示上次结果</span><span class="canvas-help" id="canvasHelp">支持拖入多张图片</span></div>
         <div class="compare-controls" id="compareControls" hidden><span>原图</span><label class="sr-only" for="compareRange">对比分割位置</label><input type="range" id="compareRange" min="0" max="100" value="50"><span>处理后</span></div>
       </div>
-      <div class="queue-heading"><h3>图片队列 <span id="queueCount">0</span></h3><div><span id="queueSummary">还没有图片</span><button class="button button-secondary export-button" id="exportButton" title="每张图片导出最近一次成功结果；重新处理中的图片使用上次成功结果" disabled><span data-icon="download"></span><span id="exportButtonText">一键导出最新结果（0）</span></button><button class="text-button" id="cancelAllButton" hidden>取消全部任务</button><button class="icon-button queue-add" id="queueImportButton" aria-label="添加更多图片" title="添加更多图片" disabled><span data-icon="plus"></span></button></div></div>
+      <div class="queue-heading"><h3>图片队列 <span id="queueCount">0</span></h3><div><span id="queueSummary">还没有图片</span><button class="button button-secondary export-button" id="exportButton" title="每张图片导出最近一次成功结果；重新处理中的图片使用上次成功结果" disabled><span data-icon="download"></span><span id="exportButtonText">一键导出最新结果（0）</span></button><button class="text-button" id="cancelAllButton" hidden>取消全部任务</button><button class="text-button queue-clear-button" id="clearQueueButton" disabled>清空图片队列</button><button class="icon-button queue-add" id="queueImportButton" aria-label="添加更多图片" title="添加更多图片" disabled><span data-icon="plus"></span></button></div></div>
       <div class="image-queue" id="imageQueue"><div class="queue-empty"><span data-icon="layers"></span>导入的图片会显示在这里，可逐张调整参数</div></div>
     </section>
 
@@ -56,6 +56,13 @@
     </aside>
   </main>
   <input type="file" id="fileInput" accept="image/*,.tif,.tiff,.avif,.tga" multiple hidden>
+  <dialog class="shutdown-dialog" id="clearQueueDialog" aria-labelledby="clearQueueTitle" aria-describedby="clearQueueDetail">
+    <span class="dialog-icon" data-icon="layers"></span>
+    <h2 id="clearQueueTitle">清空图片队列？</h2>
+    <p id="clearQueueDetail">将取消尚未完成的任务，并从队列移除全部图片。原图与已经保存的结果会保留。</p>
+    <p class="task-error" id="clearQueueError" role="alert" hidden></p>
+    <div class="dialog-actions"><button class="button button-secondary" id="cancelClearQueue" autofocus>保留队列</button><button class="button button-dark" id="confirmClearQueue">确认清空</button></div>
+  </dialog>
   <dialog class="shutdown-dialog output-dialog" id="outputDialog" aria-labelledby="outputTitle" aria-describedby="outputHint">
     <span class="dialog-icon" data-icon="folder"></span>
     <h2 id="outputTitle">更改自动保存位置</h2>
