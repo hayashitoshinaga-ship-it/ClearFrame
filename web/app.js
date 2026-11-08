@@ -24,7 +24,14 @@
   };
   const icon = (name, extra = '') => `<svg viewBox="0 0 24 24" aria-hidden="true" class="${extra}">${paths[name] || paths.image}</svg>`;
   function hydrateIcons(scope = document) { scope.querySelectorAll('[data-icon]').forEach(el => { el.innerHTML = icon(el.dataset.icon); }); }
-  const state = {config: null, draft: null, items: [], selectedId: null, view: 'original', zoom: 'fit', split: 50, scale: 1, connected: false, stopped: false, pendingFiles: [], importing: false, polling: false, hardwarePolling: false, batchStarting: false, batchCancelled: false, hardware: null};
+  const state = {config: null, draft: null, items: [], selectedId: null, view: 'original', zoom: 'fit', split: 50, scale: 1, connected: false, stopped: false, closing: false, shutdownWait: null, pendingFiles: [], importing: false, polling: false, hardwarePolling: false, batchStarting: false, batchCancelled: false, hardware: null};
+  const halted = () => state.stopped || state.closing;
+  // Hold in-flight responses while shutdown is undecided. A failed shutdown can
+  // resume the same requests; a successful shutdown discards their late results.
+  async function mayUpdate() {
+    if (state.closing) await state.shutdownWait;
+    return !state.stopped;
+  }
   const selected = () => state.items.find(item => item.id === state.selectedId) || null;
   const settings = () => selected()?.settings || state.draft;
   const copy = (value) => JSON.parse(JSON.stringify(value));
@@ -62,7 +69,9 @@
   async function initialize() {
     $('retryConnection').disabled = true;
     try {
-      state.config = await api('/api/config');
+      const config = await api('/api/config');
+      if (!(await mayUpdate())) return;
+      state.config = config;
       state.draft ||= copy(state.config.defaults);
       setConnection(true); $('connectionError').hidden = true;
       $('outputDirectory').textContent = state.config.output_dir || '项目 results 文件夹';
@@ -70,6 +79,7 @@
       $('appVersion').textContent = `v${state.config.version || '1.0'}`;
       renderAll(); pollHardware(); pollJobs();
     } catch (error) {
+      if (!(await mayUpdate())) return;
       setConnection(false); $('connectionError').hidden = false; $('connectionErrorDetail').textContent = error.message;
     } finally { $('retryConnection').disabled = false; }
   }
@@ -107,56 +117,83 @@
     if (full) renderSettings(); else renderStrength();
     renderViewer(); renderActions(); renderQueue();
   }
+  function renderDownload() {
+    const item = selected(), available = Boolean(item?.lastResult) && state.connected && !halted();
+    $('downloadButton').classList.toggle('disabled', !available);
+    $('downloadButton').setAttribute('aria-disabled', String(!available));
+    if (available) {
+      $('downloadButton').href = item.lastResult.download_url || `${item.lastResult.result_url}?download=1`;
+      $('downloadButton').download = item.name.replace(/\.[^.]+$/, '') + '_clearframe.png';
+    } else $('downloadButton').removeAttribute('href');
+  }
   function renderActions() {
-    const item = selected(), unavailable = !state.config || !state.connected || state.stopped;
+    const item = selected(), unavailable = !state.config || !state.connected || halted();
     ['importButton', 'emptyImportButton', 'queueImportButton'].forEach(id => { $(id).disabled = unavailable; });
     $('startButton').disabled = unavailable || !item || active(item) || state.batchStarting;
-    $('startButton').querySelector('span:last-child').textContent = item && active(item) ? (item.status === 'queued' ? '已加入处理队列' : '正在处理当前图片') : item?.lastResult ? '用当前参数重新处理' : '处理当前图片';
+    $('startButton').querySelector('span:last-child').textContent = state.stopped ? '服务已关闭' : item && active(item) ? (item.status === 'queued' ? '已加入处理队列' : '正在处理当前图片') : item?.lastResult ? '用当前参数重新处理' : '处理当前图片';
     const available = state.items.filter(item => !active(item)).length;
     $('batchButton').disabled = unavailable || !available || state.batchStarting;
     $('batchButton').textContent = state.batchStarting ? '正在加入队列…' : `处理全部图片${state.items.length ? `（${available}）` : ''}`;
-    $('cancelAllButton').hidden = !state.items.some(active);
-    if ($('shutdownButton')) $('shutdownButton').disabled = !state.connected || state.stopped;
+    $('cancelAllButton').hidden = state.stopped || !state.items.some(active);
+    $('cancelAllButton').disabled = unavailable;
+    if ($('shutdownButton')) $('shutdownButton').disabled = !state.connected || halted();
+    renderDownload();
   }
   let lastQueueRender = '';
   function renderQueue() {
-    const signature = JSON.stringify([state.selectedId, state.batchStarting, state.items.map(item => [item.id, item.name, item.source_url, item.status, stale(item)])]);
+    if (state.stopped) {
+      // Keep existing thumbnails in place: rebuilding them would request images
+      // from the service that has just stopped.
+      $('queueSummary').textContent = '服务已关闭';
+      $('imageQueue').querySelectorAll('[data-image-id]').forEach(element => {
+        const item = state.items.find(item => item.id === element.dataset.imageId);
+        element.setAttribute('aria-disabled', 'true'); element.tabIndex = -1;
+        const remove = element.querySelector('[data-remove]'); if (remove) remove.disabled = true;
+        if (item && active(item)) {
+          const status = element.querySelector('.queue-status');
+          status.className = 'queue-status cancelled'; status.innerHTML = `${icon('clock')}已停止`;
+          element.setAttribute('aria-label', `${item.name}, 已停止`);
+        }
+      });
+      return;
+    }
+    const signature = JSON.stringify([state.selectedId, state.batchStarting, state.stopped, state.items.map(item => [item.id, item.name, item.source_url, item.status, stale(item)])]);
     if (signature === lastQueueRender) return;
     lastQueueRender = signature;
     const scroll = $('imageQueue').scrollLeft;
     $('queueCount').textContent = state.items.length;
-    const running = state.items.filter(active).length, completed = state.items.filter(item => item.status === 'completed').length;
+    const running = state.stopped ? 0 : state.items.filter(active).length, completed = state.items.filter(item => item.status === 'completed').length;
     $('queueSummary').textContent = !state.items.length ? '还没有图片' : running ? `${running} 张正在处理或排队` : `${completed} 张已完成`;
     if (!state.items.length) {
       $('imageQueue').innerHTML = `<div class="queue-empty">${icon('layers')}导入的图片会显示在这里，可逐张调整参数</div>`; return;
     }
     $('imageQueue').innerHTML = state.items.map(item => {
-      const status = item.status === 'completed' && stale(item) ? '参数已修改' : statusNames[item.status] || item.status;
-      const statusIcon = active(item) ? icon('loader', 'spinner') : item.status === 'completed' ? icon('check') : icon('clock');
-      return `<div class="queue-item${item.id === state.selectedId ? ' selected' : ''}" data-image-id="${escape(item.id)}" role="button" tabindex="0" aria-pressed="${item.id === state.selectedId}" aria-label="${escape(item.name)}, ${escape(status)}"><img class="queue-thumb" src="${escape(item.source_url)}" alt="" loading="lazy"><div class="queue-file"><strong title="${escape(item.name)}">${escape(item.name)}</strong><span class="queue-status ${escape(item.status)}">${statusIcon}${escape(status)}</span></div><button class="queue-remove" data-remove="${escape(item.id)}" ${active(item) || state.batchStarting ? 'disabled' : ''} title="从队列移除" aria-label="移除 ${escape(item.name)}">${icon('x')}</button></div>`;
+      const status = state.stopped && active(item) ? '已停止' : item.status === 'completed' && stale(item) ? '参数已修改' : statusNames[item.status] || item.status;
+      const statusIcon = active(item) && !state.stopped ? icon('loader', 'spinner') : item.status === 'completed' ? icon('check') : icon('clock');
+      return `<div class="queue-item${item.id === state.selectedId ? ' selected' : ''}" data-image-id="${escape(item.id)}" role="button" tabindex="0" aria-pressed="${item.id === state.selectedId}" aria-label="${escape(item.name)}, ${escape(status)}"><img class="queue-thumb" src="${escape(item.source_url)}" alt="" loading="lazy" draggable="false"><div class="queue-file"><strong title="${escape(item.name)}">${escape(item.name)}</strong><span class="queue-status ${escape(item.status)}">${statusIcon}${escape(status)}</span></div><button class="queue-remove" data-remove="${escape(item.id)}" ${active(item) || state.batchStarting ? 'disabled' : ''} title="从队列移除" aria-label="移除 ${escape(item.name)}">${icon('x')}</button></div>`;
     }).join('');
     $('imageQueue').scrollLeft = scroll;
   }
   function renderTask() {
     const item = selected(), job = item?.job, status = item?.status || 'ready';
-    $('taskPill').textContent = statusNames[status] || '待开始';
+    $('taskPill').textContent = state.stopped ? '已关闭' : statusNames[status] || '待开始';
     $('taskPill').className = `status-pill ${status === 'queued' || status === 'submitting' ? 'running' : status}`;
-    $('taskStageIcon').classList.toggle('running', Boolean(item && active(item)));
+    $('taskStageIcon').classList.toggle('running', Boolean(item && active(item) && !state.stopped));
     $('taskStageIcon').innerHTML = icon(status === 'completed' ? 'check' : status === 'failed' ? 'x' : active(item || {}) ? 'layers' : 'sparkle');
     const titles = {ready: item ? '图片已就绪' : '准备好，再开始', submitting:'正在提交任务',queued:'等待处理',running:'正在处理',completed:'处理完成',failed:'处理未完成',cancelled:'任务已取消'};
-    $('taskStage').textContent = job?.stage || titles[status];
+    $('taskStage').textContent = state.stopped ? '本地服务已关闭' : job?.stage || titles[status];
     const defaults = {ready: item ? '选好处理方式与强度，然后手动开始。每张图片单独保存参数。' : '导入图片，选好处理方式后点击“处理当前图片”。',submitting:'正在把参数发送给本地处理程序。',queued:'当前只有一个处理任务运行，其余图片依次执行。',running:'正在执行本地处理步骤。',completed:'结果已保存。可切换预览模式，检查细节。',failed:'请查看下方原因，调整后可重新开始。',cancelled:'处理已停止，原图与上次完成的结果仍保留。'};
-    $('taskDetail').textContent = status === 'cancelled' ? '任务已取消，保留原图与上次结果。' : item?.cancelling || item?.cancelWhenSubmitted ? '正在请求取消，当前步骤结束后停止…' : job?.detail || defaults[status];
+    $('taskDetail').textContent = state.stopped ? '已完成的结果保存在 results 文件夹，再次使用请重新运行启动器。' : status === 'cancelled' ? '任务已取消，保留原图与上次结果。' : item?.cancelling || item?.cancelWhenSubmitted ? '正在请求取消，当前步骤结束后停止…' : job?.detail || defaults[status];
     const progress = Number.isFinite(job?.progress) ? Math.min(100, Math.max(0, job.progress)) : 0;
     $('taskPercent').textContent = job ? `${Math.round(progress)}%` : '—';
     $('taskProgress').setAttribute('aria-valuenow', String(progress));
     $('taskProgressFill').style.width = `${progress}%`;
     $('taskElapsed').textContent = job ? `已用时 ${niceTime(job.elapsed_seconds)}` : '尚未运行';
     $('taskDevice').textContent = deviceName(job?.actual_device);
-    $('cancelButton').hidden = !item || !['queued', 'running'].includes(status);
-    $('cancelButton').disabled = Boolean(item?.cancelling);
+    $('cancelButton').hidden = state.stopped || !item || !['queued', 'running'].includes(status);
+    $('cancelButton').disabled = halted() || !state.connected || Boolean(item?.cancelling);
     $('cancelButton').textContent = item?.cancelling ? '取消中' : '取消';
-    const error = item?.localError || job?.error || item?.pollError;
+    const error = state.stopped ? null : item?.localError || job?.error || item?.pollError;
     $('taskError').hidden = !error;
     $('taskError').textContent = error || '';
   }
@@ -173,11 +210,7 @@
       button.setAttribute('aria-pressed', String(button.dataset.view === state.view));
     });
     ['zoomOut', 'zoomIn', 'zoomSelect'].forEach(id => { $(id).disabled = !item; });
-    $('downloadButton').classList.toggle('disabled', !hasResult); $('downloadButton').setAttribute('aria-disabled', String(!hasResult));
-    if (hasResult) {
-      $('downloadButton').href = item.lastResult.download_url || `${item.lastResult.result_url}?download=1`;
-      $('downloadButton').download = item.name.replace(/\.[^.]+$/, '') + '_clearframe.png';
-    } else $('downloadButton').removeAttribute('href');
+    renderDownload();
     $('staleStatus').hidden = !stale(item);
     $('canvasHelp').textContent = item ? '拖动平移 · F 适应窗口' : '支持拖入多张图片';
     $('viewStatus').innerHTML = `<span class="quiet-dot"></span>${escape(!item ? '等待导入' : state.view === 'original' ? '原始图片' : state.view === 'result' ? '处理结果' : '左侧原图 · 右侧结果')}`;
@@ -233,66 +266,76 @@
   }
   function renderAll() { renderSettings(); renderQueue(); renderTask(); renderViewer(); renderActions(); }
   function selectImage(id) {
-    if (!state.items.some(item => item.id === id)) return;
+    if (halted() || !state.items.some(item => item.id === id)) return;
     state.selectedId = id; state.zoom = 'fit';
     if (selected().lastResult) state.view = 'compare'; else state.view = 'original';
     $('viewport').scrollTop = 0; $('viewport').scrollLeft = 0; renderAll();
   }
   async function importFiles(files) {
-    if (!state.connected || !state.config || state.stopped) return toast('请先连接本地处理程序。', true);
+    if (!state.connected || !state.config || halted()) return toast(state.stopped ? '本地服务已关闭，请重新运行启动器。' : '请先连接本地处理程序。', true);
     state.pendingFiles.push(...Array.from(files).map(file => ({file, settings: copy(settings())})));
     if (state.importing) return;
     state.importing = true; document.body.classList.add('loading-import');
     let count = 0;
     while (state.pendingFiles.length) {
+      if (!(await mayUpdate())) break;
       const {file, settings: fileSettings} = state.pendingFiles.shift();
       try {
         if (file.size > 80 * 1024 * 1024) throw new Error('图片超过 80 MB，请先缩小文件。');
         const imported = await api(`/api/images?name=${encodeURIComponent(file.name || 'clipboard.png')}`, {method:'POST', headers:{'Content-Type':'application/octet-stream'}, body:file});
+        if (!(await mayUpdate())) break;
         const item = {...imported,settings:fileSettings,status:'ready',job:null,lastResult:null,localError:null};
         state.items.push(item); count++;
         if (!state.selectedId) selectImage(item.id); else { renderQueue(); renderActions(); }
-      } catch (error) { toast(`${file.name || '图片'}：${error.message}`, true); }
+      } catch (error) { if (!(await mayUpdate())) break; toast(`${file.name || '图片'}：${error.message}`, true); }
     }
     state.importing = false; document.body.classList.remove('loading-import');
+    if (state.stopped) return;
     if (count) toast(`已导入 ${count} 张图片。选择参数后，点击开始处理。`);
     renderActions();
   }
   async function startItem(item, snapshot = copy(item.settings)) {
-    if (active(item)) return;
+    if (active(item) || halted()) return;
     item.status = 'submitting'; item.localError = null; item.pollError = null; item.job = null; item.cancelling = false; item.cancelWhenSubmitted = false;
     renderQueue(); renderTask(); renderActions();
     try {
       const job = await api('/api/jobs', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({image_id:item.id,...snapshot})});
+      if (!(await mayUpdate())) return;
       item.job = {...job, progress:0, elapsed_seconds:0, settings:snapshot}; item.status = job.status || 'queued';
       if (item.cancelWhenSubmitted) { item.cancelWhenSubmitted = false; await cancelItem(item); }
       pollJobs();
-    } catch (error) { item.status = 'failed'; item.localError = error.message; toast(`${item.name}：${error.message}`, true); }
+    } catch (error) { if (!(await mayUpdate())) return; item.status = 'failed'; item.localError = error.message; toast(`${item.name}：${error.message}`, true); }
+    if (!(await mayUpdate())) return;
     renderQueue(); renderTask(); renderActions();
   }
   async function startAll() {
-    if (state.batchStarting) return;
+    if (state.batchStarting || halted()) return;
     const batch = state.items.filter(item => !active(item)).map(item => ({item, snapshot:copy(item.settings)}));
     state.batchStarting = true; state.batchCancelled = false; renderActions(); renderQueue();
     for (const {item, snapshot} of batch) { if (state.stopped || state.batchCancelled) break; if (state.items.includes(item)) await startItem(item, snapshot); }
-    state.batchStarting = false; renderActions(); renderQueue();
+    state.batchStarting = false;
+    if (!(await mayUpdate())) return;
+    renderActions(); renderQueue();
   }
   async function cancelItem(item) {
+    if (halted()) return;
     if (item?.status === 'submitting') { item.cancelWhenSubmitted = true; renderTask(); return; }
     if (!item?.job || !active(item) || item.cancelling) return;
     item.cancelling = true; renderTask();
     try { await api(`/api/jobs/${encodeURIComponent(item.job.id)}/cancel`, {method:'POST'}); }
-    catch (error) { item.cancelling = false; item.localError = error.message; toast(error.message, true); }
+    catch (error) { if (!(await mayUpdate())) return; item.cancelling = false; item.localError = error.message; toast(error.message, true); }
+    if (!(await mayUpdate())) return;
     renderTask(); pollJobs();
   }
   async function pollJobs() {
-    if (state.polling || state.stopped) return;
+    if (state.polling || halted()) return;
     const waiting = state.items.filter(item => active(item) && item.job);
     if (!waiting.length) return;
     state.polling = true;
     await Promise.all(waiting.map(async item => {
       try {
         const job = await api(`/api/jobs/${encodeURIComponent(item.job.id)}`);
+        if (!(await mayUpdate())) return;
         if (item.job.id !== job.id) return;
         item.pollError = null; item.job = {...item.job,...job}; item.status = job.status;
         if (!active(item)) item.cancelling = false;
@@ -301,18 +344,22 @@
           if (item.id === state.selectedId) { state.view = 'compare'; renderViewer(); }
           toast(`${item.name} 处理完成，用时 ${niceTime(job.elapsed_seconds)}。`);
         }
-      } catch (error) { item.pollError = `任务状态暂时无法读取。${error.message} 恢复连接后将继续更新。`; }
+      } catch (error) { if (!(await mayUpdate())) return; item.pollError = `任务状态暂时无法读取。${error.message} 恢复连接后将继续更新。`; }
     }));
-    state.polling = false; renderQueue(); renderTask(); renderActions();
+    state.polling = false;
+    if (!(await mayUpdate())) return;
+    renderQueue(); renderTask(); renderActions();
   }
   const measured = value => typeof value === 'number' && Number.isFinite(value);
   function metric(id, value, suffix = '%', digits = 0) { $(id).textContent = measured(value) ? `${value.toFixed(digits)}${suffix}` : '—'; }
   function meter(id, percent) { $(id).style.width = measured(percent) ? `${Math.min(100, Math.max(0, percent))}%` : '0%'; $(id).parentElement.setAttribute('aria-label', measured(percent) ? `${percent.toFixed(1)}%` : '无可用读数'); }
   async function pollHardware() {
-    if (state.hardwarePolling || state.stopped || !state.config) return;
+    if (state.hardwarePolling || halted() || !state.config) return;
     state.hardwarePolling = true;
     try {
-      const data = await api('/api/hardware'); state.hardware = data;
+      const data = await api('/api/hardware');
+      if (!(await mayUpdate())) return;
+      state.hardware = data;
       if (!state.connected) { setConnection(true); $('connectionError').hidden = true; }
       $('hardwareLive').innerHTML = '<i></i>实时更新'; $('hardwareLive').classList.add('online');
       metric('cpuUsage', data.cpu_percent); meter('cpuMeter', data.cpu_percent);
@@ -329,6 +376,7 @@
       gpuOption.textContent = data.cuda_available === null ? 'NVIDIA GPU（检测中）' : data.cuda_available ? 'NVIDIA GPU' : 'NVIDIA GPU（当前不可用）';
       $('hardwareNote').textContent = data.cuda_available === null ? '正在检测 GPU 计算环境；负载为整机读数。' : data.cuda_available ? '读取整机状态，包含其他程序占用。照片降噪步骤使用 CPU。' : 'GPU 计算当前不可用。自动模式将使用 CPU；“—”表示没有可用读数。';
     } catch (error) {
+      if (!(await mayUpdate())) return;
       setConnection(false); $('hardwareLive').innerHTML = '<i></i>连接中断'; $('hardwareLive').classList.remove('online');
       ['cpuUsage','ramUsage','gpuUsage','gpuTemp','vramUsage'].forEach(id => { $(id).textContent = '—'; });
       ['cpuMeter','ramMeter','vramMeter'].forEach(id => meter(id, null));
@@ -371,6 +419,7 @@
   $('cancelButton').addEventListener('click', () => cancelItem(selected()));
   $('cancelAllButton').addEventListener('click', async () => { state.batchCancelled = true; for (const item of state.items.filter(active)) await cancelItem(item); });
   $('imageQueue').addEventListener('click', event => {
+    if (halted()) return;
     const remove = event.target.closest('[data-remove]');
     if (remove) {
       const item = state.items.find(item => item.id === remove.dataset.remove); if (!item || active(item) || state.batchStarting) return;
@@ -412,16 +461,29 @@
     if (event.key === '-') { event.preventDefault(); $('zoomOut').click(); }
   });
   let dragDepth = 0;
-  document.addEventListener('dragover', event => { if (event.dataTransfer.types.includes('Files')) event.preventDefault(); });
-  document.addEventListener('drop', event => { if (event.dataTransfer.files.length) { event.preventDefault(); dragDepth = 0; $('dragOverlay').hidden = true; importFiles(event.dataTransfer.files); } });
-  document.addEventListener('dragenter', event => { if (event.dataTransfer.types.includes('Files')) { dragDepth++; $('dragOverlay').hidden = false; } });
+  const clearDrag = () => { dragDepth = 0; $('dragOverlay').hidden = true; };
+  const hasDraggedFiles = event => Array.from(event.dataTransfer?.types || []).includes('Files');
+  document.addEventListener('dragover', event => {
+    event.preventDefault(); // Never let a file, image URI, or link navigate away.
+    if (event.dataTransfer) event.dataTransfer.dropEffect = hasDraggedFiles(event) && !halted() ? 'copy' : 'none';
+  });
+  document.addEventListener('drop', event => {
+    event.preventDefault(); clearDrag();
+    if (halted()) return;
+    const files = Array.from(event.dataTransfer?.files || []);
+    if (files.length) importFiles(files);
+    else if (event.dataTransfer?.types.length) toast('请从电脑拖入图片文件，暂不支持拖入网页链接或文件夹。');
+  });
+  document.addEventListener('dragenter', event => { if (hasDraggedFiles(event) && !halted()) { dragDepth++; $('dragOverlay').hidden = false; } });
   document.addEventListener('dragleave', () => { dragDepth = Math.max(0, dragDepth - 1); if (!dragDepth) $('dragOverlay').hidden = true; });
+  document.addEventListener('dragend', clearDrag);
+  window.addEventListener('blur', clearDrag);
   document.addEventListener('paste', event => {
     if (event.target.matches('input,textarea,[contenteditable="true"]')) return;
     const files = [...(event.clipboardData?.items || [])].filter(item => item.kind === 'file' && item.type.startsWith('image/')).map(item => item.getAsFile()).filter(Boolean);
     if (files.length) { event.preventDefault(); importFiles(files); }
   });
-  $('downloadButton').addEventListener('click', event => { if ($('downloadButton').getAttribute('aria-disabled') === 'true') event.preventDefault(); });
+  $('downloadButton').addEventListener('click', event => { if (halted() || !state.connected || $('downloadButton').getAttribute('aria-disabled') === 'true') event.preventDefault(); });
   $('retryConnection').addEventListener('click', initialize);
   let shutdownPending = false;
   $('shutdownButton')?.addEventListener('click', () => {
@@ -435,24 +497,34 @@
   $('confirmShutdown').addEventListener('click', async () => {
     if (shutdownPending) return;
     shutdownPending = true;
+    let settleShutdown;
+    state.shutdownWait = new Promise(resolve => { settleShutdown = resolve; });
+    state.closing = true; clearDrag(); renderActions(); renderTask();
     $('confirmShutdown').disabled = true; $('cancelShutdown').disabled = true;
     $('confirmShutdown').textContent = '正在退出…'; $('shutdownError').hidden = true;
     try {
-      await api('/api/shutdown', {method:'POST'}); state.stopped = true; setConnection(false, '服务已关闭');
+      await api('/api/shutdown', {method:'POST'});
+      state.stopped = true; state.pendingFiles.length = 0; state.batchCancelled = true;
+      state.importing = false; state.batchStarting = false; document.body.classList.remove('loading-import');
+      clearInterval(jobTimer); clearInterval(hardwareTimer);
+      setConnection(false, '服务已关闭'); renderTask(); renderQueue();
       $('shutdownDialog').close();
       $('connectionError').hidden = false; $('connectionError').querySelector('strong').textContent = '本地服务已关闭';
       $('connectionErrorDetail').textContent = '已完成的结果保存在 results 文件夹。再次使用请重新运行启动器并刷新页面。';
       $('retryConnection').hidden = true; $('hardwareLive').innerHTML = '<i></i>已停止'; $('hardwareLive').classList.remove('online');
       ['cpuUsage','ramUsage','gpuUsage','gpuTemp','vramUsage'].forEach(id => { $(id).textContent = '—'; });
       ['cpuMeter','ramMeter','vramMeter'].forEach(id => meter(id, null));
+      $('hardwareNote').textContent = '本地服务已关闭，硬件状态不再更新。';
     } catch (error) { $('shutdownError').textContent = error.message; $('shutdownError').hidden = false; }
     finally {
+      state.closing = false; settleShutdown();
       shutdownPending = false; $('confirmShutdown').disabled = false; $('cancelShutdown').disabled = false;
       $('confirmShutdown').textContent = '退出程序';
+      if (!state.stopped) { renderActions(); renderTask(); pollJobs(); pollHardware(); }
     }
   });
   new ResizeObserver(() => resizeViewer()).observe($('viewport'));
   hydrateIcons(); initialize();
-  setInterval(pollJobs, 550); setInterval(pollHardware, 2200);
+  const jobTimer = setInterval(pollJobs, 550), hardwareTimer = setInterval(pollHardware, 2200);
   document.addEventListener('visibilitychange', () => { if (!document.hidden) { pollJobs(); pollHardware(); } });
 })();

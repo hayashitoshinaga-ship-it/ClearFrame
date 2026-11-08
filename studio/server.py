@@ -38,38 +38,51 @@ def safe_stem(name):
 
 
 def normalise_image(data, destination):
-    with Image.open(io.BytesIO(data)) as image:
-        if getattr(image, "is_animated", False):
-            raise ValueError("请导入静态图片；动图需先导出单帧。")
-        if image.width * image.height > MAX_PIXELS or min(image.size) < 16:
-            raise ValueError("图片需至少 16×16，且不超过 1677 万像素。")
-        image.load()
-        image = ImageOps.exif_transpose(image)
-        profile = image.info.get("icc_profile")
-        if image.mode == "CMYK":
-            if profile:
-                image = ImageCms.profileToProfile(image, ImageCms.ImageCmsProfile(io.BytesIO(profile)),
-                                                 ImageCms.createProfile("sRGB"), outputMode="RGB")
-            else:
-                image = image.convert("RGB")
-            profile = None
-        elif image.mode in ("I;16", "I;16B", "I;16L", "I", "F"):
-            import numpy as np
-            values = np.asarray(image, dtype=np.float64)
-            if not np.isfinite(values).all():
-                raise ValueError("图片含有无效的浮点像素。")
-            if image.mode == "F" and values.min() >= 0 and values.max() <= 1:
-                values *= 255
-            scale = 257 if image.mode.startswith("I;16") or values.max() > 255 else 1
-            image = Image.fromarray(np.clip(values / scale + .5, 0, 255).astype("uint8"), "L")
-            profile = None
-        elif image.mode not in ("RGB", "RGBA", "P"):
-            profile = None
-        has_alpha = "A" in image.getbands() or "transparency" in image.info
-        image = image.convert("RGBA" if has_alpha else "RGB")
-        kwargs = {"icc_profile": profile} if profile else {}
-        image.save(destination, "PNG", **kwargs)
-        return image.width, image.height, has_alpha
+    try:
+        with Image.open(io.BytesIO(data)) as image:
+            if getattr(image, "is_animated", False):
+                raise ValueError("请导入静态图片；动图需先导出单帧。")
+            if image.width * image.height > MAX_PIXELS or min(image.size) < 16:
+                raise ValueError("图片需至少 16×16，且不超过 1677 万像素。")
+            image.load()
+            image = ImageOps.exif_transpose(image)
+            profile = image.info.get("icc_profile")
+            if image.mode == "CMYK":
+                if profile:
+                    try:
+                        image = ImageCms.profileToProfile(image, ImageCms.ImageCmsProfile(io.BytesIO(profile)),
+                                                         ImageCms.createProfile("sRGB"), outputMode="RGB")
+                    except (OSError, ValueError, ImageCms.PyCMSError) as exc:
+                        raise ValueError("图片的色彩配置无法读取，请先转换为 sRGB 图片后再导入。") from exc
+                else:
+                    image = image.convert("RGB")
+                profile = None
+            elif image.mode in ("I;16", "I;16B", "I;16L", "I", "F"):
+                import numpy as np
+                values = np.asarray(image, dtype=np.float64)
+                if not np.isfinite(values).all():
+                    raise ValueError("图片含有无效的浮点像素。")
+                if image.mode == "F" and values.min() >= 0 and values.max() <= 1:
+                    values *= 255
+                scale = 257 if image.mode.startswith("I;16") or values.max() > 255 else 1
+                image = Image.fromarray(np.clip(values / scale + .5, 0, 255).astype("uint8"), "L")
+                profile = None
+            elif image.mode not in ("RGB", "RGBA", "P"):
+                profile = None
+            has_alpha = "A" in image.getbands() or "transparency" in image.info
+            image = image.convert("RGBA" if has_alpha else "RGB")
+    except UnidentifiedImageError as exc:
+        raise ValueError("无法识别这个文件，可能不是图片、格式不受支持或文件已损坏。请导入有效的 PNG、JPEG、WebP、BMP 或 TIFF 图片。") from exc
+    except Image.DecompressionBombError as exc:
+        raise ValueError("图片像素过多，请缩小至不超过 1677 万像素后再导入。") from exc
+    except ImageCms.PyCMSError as exc:
+        raise ValueError("图片的色彩配置无法读取，请先转换为 sRGB 图片后再导入。") from exc
+    except (OSError, SyntaxError, EOFError) as exc:
+        raise ValueError("图片数据已损坏或不完整，请重新导出或下载完整图片后再导入。") from exc
+    # Keep output I/O failures separate from invalid-image errors (HTTP 500 vs 400).
+    kwargs = {"icc_profile": profile} if profile else {}
+    image.save(destination, "PNG", **kwargs)
+    return image.width, image.height, has_alpha
 
 
 class StudioState:

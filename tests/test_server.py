@@ -8,6 +8,7 @@ import tempfile
 import threading
 import time
 import unittest
+from unittest import mock
 from urllib.parse import quote
 
 import numpy as np
@@ -247,12 +248,42 @@ class ServerIntegrationTests(unittest.TestCase):
         self.assertEqual(list(self.state.output.iterdir()), [])
 
     def test_corrupt_import_is_rejected_without_orphans(self):
-        status, result, _ = self.request("POST", "/api/images?name=broken.png", b"not an image")
+        status, result, _ = self.request("POST", "/api/images?name=not-an-image.txt", b"not an image")
         self.assertEqual(status, 400, result)
-        self.assertIn("error", result)
+        self.assertIn("无法识别", result["error"])
+        self.assertIn("PNG", result["error"])
+        self.assertNotIn("BytesIO", result["error"])
+        self.assertNotIn("0x", result["error"])
         self.assertEqual(self.state.images, {})
         self.assertEqual(list(self.state.imports.iterdir()), [])
         self.assertEqual(self.processor.calls, [])
+
+    def test_truncated_pixels_return_chinese_input_error(self):
+        pixels = np.random.default_rng(17).integers(0, 256, (32, 32, 3), dtype=np.uint8)
+        complete = encoded_image(Image.fromarray(pixels))
+        status, result, _ = self.request("POST", "/api/images?name=truncated.png", complete[:len(complete) // 2])
+        self.assertEqual(status, 400, result)
+        self.assertIn("损坏或不完整", result["error"])
+        self.assertNotIn("0x", result["error"])
+        self.assertEqual(self.state.images, {})
+        self.assertEqual(list(self.state.imports.iterdir()), [])
+
+    def test_bad_cmyk_profile_returns_actionable_input_error(self):
+        data = encoded_image(Image.new("CMYK", (24, 16)), "JPEG", icc_profile=b"invalid-profile")
+        status, result, _ = self.request("POST", "/api/images?name=bad-profile.jpg", data)
+        self.assertEqual(status, 400, result)
+        self.assertIn("色彩配置", result["error"])
+        self.assertIn("sRGB", result["error"])
+        self.assertEqual(self.state.images, {})
+        self.assertEqual(list(self.state.imports.iterdir()), [])
+
+    def test_import_output_failure_remains_server_error(self):
+        data = encoded_image(Image.new("RGB", (24, 16)))
+        with mock.patch("studio.server.Image.Image.save", side_effect=OSError("disk write failed")):
+            status, result, _ = self.request("POST", "/api/images?name=valid.png", data)
+        self.assertEqual(status, 500, result)
+        self.assertEqual(self.state.images, {})
+        self.assertEqual(list(self.state.imports.iterdir()), [])
 
     def test_float_and_low_value_16_bit_imports_are_scaled(self):
         values = np.tile(np.linspace(0, 1, 16, dtype=np.float32), (16, 1))
