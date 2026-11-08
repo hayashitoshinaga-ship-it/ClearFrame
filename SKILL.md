@@ -1,28 +1,25 @@
 ---
-name: gpt-anime-denoise
-description: Remove the fish-scale (鱼鳞纹) noise that GPT image models (gpt-image-2/2.5/2.6, ChatGPT, Codex image_gen) leave in anime, illustration and TV-anime style images. Use after generating or receiving any GPT-made anime image that will be delivered, or when the user mentions 鱼鳞纹, 鳞片噪点, GPT 图噪点, fish-scale artifacts, or cleaning GPT anime images.
+name: clearframe-manual
+description: Help the user explicitly launch or operate the local ClearFrame image cleanup workbench when they name ClearFrame or invoke $clearframe-manual. Manual invocation only; do not activate after image generation, image receipt, or a generic mention of noise or artifacts.
 ---
 
-# GPT 二次元图去鱼鳞纹
+# ClearFrame 手动图像处理
 
-GPT 生图在二次元 / 番剧画风里会留下细密的鱼鳞状纹理。人眼在原尺寸下能看出来，但放大、高通滤波和频谱分析都不容易检测到——**不要自己判断"这张图没有噪点"**，每张要交付的 GPT 二次元图都跑一遍。
+这是独立本地工作台的可选操作说明。程序不依赖 skill 安装，不调用 OpenAI API，也不需要读取 API Key。
 
-## 用法
+## 调用边界
 
-```bash
-python <skill目录>/denoise.py <图片或文件夹> [...]           # 默认方案：ESRGAN 缩 60% + L0 0.001
-python <skill目录>/denoise.py <图片> --all                    # 7 种候选 + 4×2 原尺寸对比图
-python <skill目录>/denoise.py <图片> --method apisr          # 指定单一方法
-```
+- 仅在用户明确请求使用 ClearFrame 或显式调用本 skill 时应用。
+- 不在生成、收到或交付图片之后自动执行，不把图片导入视为处理授权。
+- 不因为图像来自某个生成模型，就断言其有噪点或必须处理。
+- 不把动漫超分模型作为所有照片的必经步骤。照片预设采用保守的 CPU 去噪；动漫模型或 L0 由用户在自定义组合中主动选择。
 
-- 依赖：`torch`、`spandrel`、`numpy`、`pillow`（`requirements.txt`）。模型第一次运行时自动下载到 `~/.cache/gpt-anime-denoise`，有 SHA-256 校验；已有模型目录用 `--models` 指定。
-- 输出在 `<图片目录>/<文件名>_denoise/`，尺寸和输入一致，文件名 `<文件名>_<方法>.png`。
-- L0 强度用 `--l0` 调（默认 0.001，只是推荐值）：纹理残留就调大到 0.0015–0.002，淡阴影/腮红被抹平就调小到 0.0005–0.0007。
-- 方法：`esrgan60_l0`（默认）、`esrgan60`、`cugan60_l0`、`cugan60`、`apisr`、`l0_0.001`、`l0_0.0005`。
+## 操作
 
-## 交付规则
+1. 在项目目录检查本地环境是否已经准备好；首次安装使用 `Setup-ClearFrame.cmd`，平时使用 `Start-ClearFrame.cmd`。不要自动安装到 Codex/Claude 的 skills 目录。
+2. 启动本地浏览器工作台，帮助用户导入指定图片。导入与改设置不会开始处理。
+3. 根据用户选定的场景、方法与强度准备操作。说明预设只决定参数，不会自动分割人物或背景；去噪可能损失细节，动漫模型可能改变微小结构。
+4. 等用户点击开始；若用户已经明确委托 agent 处理指定图片并给出可用设置，可以据此启动对应任务。不得延伸到其他图片或自动监控目录。
+5. 查看处理状态与实际设备，完成后提供结果和原图对比。原文件不覆盖，不把进度百分比或强度称为画质提升。
 
-1. 默认交付 `esrgan60_l0`。
-2. 用户想自己挑时跑 `--all`，把 `<文件名>_sheet.png`（原尺寸并排）发给用户；**给原尺寸并排图，不要发放大的局部**，放大后反而看不出差别。
-3. 不要改用扩散重绘、ControlNet、导向/双边滤波来去噪：会重画眼睛或把画面抹糊（见 README「试过但效果不好的方法」）。
-4. 写实照片风格的图也交付默认的 `esrgan60_l0`。RealESRGAN_x4plus、realesr-general-x4v3、SCUNet、DRUNet 都测过，效果都不如默认（见 README「写实风格的图」），不要再换成这些模型。
+具体界面、方法和本地目录说明见 [docs/USER_GUIDE.md](docs/USER_GUIDE.md)。默认使用 ClearFrame 新入口，不启动上游会自动处理导入图片的 `denoise_app.py`。

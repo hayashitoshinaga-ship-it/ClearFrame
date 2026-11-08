@@ -1,0 +1,7 @@
+interface:
+  display_name: "ClearFrame 手动图像处理"
+  short_description: "手动打开本地 ClearFrame 工作台，选择图像处理方法并对比结果"
+  default_prompt: "使用 $clearframe-manual 帮我打开 ClearFrame，手动选择图片并比较处理结果。"
+
+policy:
+  allow_implicit_invocation: false

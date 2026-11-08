@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>澄图 ClearFrame · 本地图像工作台</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='18' fill='%231c7669'/%3E%3Cpath d='M20 26V18H28M36 18H44V26M44 38V46H36M28 46H20V38' fill='none' stroke='white' stroke-width='4'/%3E%3Ccircle cx='32' cy='32' r='5' fill='%23c5ece0'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="/web/style.css">
+  <script>window.CLEARFRAME_TOKEN = "__TOKEN__";</script>
+  <script src="/web/app.js" defer></script>
+</head>
+<body>
+  <header class="app-header">
+    <a class="brand" href="/" aria-label="澄图首页">
+      <span class="brand-symbol" aria-hidden="true"><svg viewBox="0 0 32 32"><path d="M7 12V7h5m8 0h5v5m0 8v5h-5m-8 0H7v-5"/><circle cx="16" cy="16" r="3"/></svg></span>
+      <span class="brand-name">澄图 <span>ClearFrame</span></span>
+      <span class="brand-divider"></span><span class="brand-subtitle">本地图像工作台</span>
+    </a>
+    <div class="header-actions"><span class="connection" id="connection"><span></span>正在连接</span><button class="button button-secondary shutdown-button" id="shutdownButton" title="退出程序并关闭本地服务" disabled><span data-icon="power"></span>退出程序</button><button class="button button-dark" id="importButton" disabled><span data-icon="plus"></span>导入图片</button></div>
+  </header>
+
+  <main class="app-layout">
+    <aside class="settings-panel" aria-label="图像处理设置">
+      <div class="panel-heading"><div><span class="eyebrow">PROCESS</span><h1>处理设置</h1></div><span class="manual-badge"><span data-icon="hand"></span>手动开始</span></div>
+      <div class="settings-scroll">
+        <section class="settings-section"><div class="section-heading"><h2><span class="step-number">01</span>图片类型</h2><span class="section-caption">选择场景</span></div><div class="scenario-grid" id="scenarioGrid" role="radiogroup" aria-label="图片类型"></div><p class="mode-note" id="modeNote">正在读取可用的处理方式…</p></section>
+        <section class="settings-section"><div class="section-heading"><h2><span class="step-number">02</span>处理方式</h2></div><div class="method-grid" id="methodGrid" role="radiogroup" aria-label="处理方式"></div><div class="method-explanation" id="methodExplanation"></div><div class="custom-stages" id="customStages" hidden><div class="custom-heading">组合步骤 <span>按以下顺序执行</span></div><div id="stageList"></div></div></section>
+        <section class="settings-section intensity-section"><div class="section-heading"><h2><span class="step-number">03</span>处理强度</h2><output class="strength-value" id="strengthValue" for="strength">50 <span>/ 100</span></output></div><label class="sr-only" for="strength">处理强度</label><input type="range" id="strength" min="0" max="100" step="1" value="50" disabled><div class="range-labels"><span>保留原图</span><span id="strengthHint">适中</span><span>更强</span></div><p class="small-note" id="strengthCaution">强度越高，细碎纹理减少越多，也可能损失淡阴影与细节。</p></section>
+        <section class="settings-section device-section"><div class="section-heading"><h2><span class="step-number">04</span>计算设备</h2></div><label class="sr-only" for="device">计算设备</label><select id="device" disabled><option value="auto">自动选择</option><option value="cuda">NVIDIA GPU</option><option value="cpu">CPU</option></select><p class="small-note">不同步骤可能使用不同设备，以任务状态显示为准。</p></section>
+      </div>
+      <div class="settings-actions"><button class="button button-primary button-full" id="startButton" disabled><span data-icon="play"></span><span>处理当前图片</span></button><button class="button button-secondary button-full" id="batchButton" disabled>处理全部图片</button><p>导入与调整参数不会自动处理</p></div>
+    </aside>
+
+    <section class="workspace" aria-label="图片预览与对比">
+      <div class="workspace-title"><div class="file-heading"><span class="file-icon" data-icon="image"></span><div><h2 id="currentName">图像预览</h2><p id="currentMeta">选择一张图片，开始整理画面</p></div></div><a class="button button-secondary download-button disabled" id="downloadButton" aria-disabled="true"><span data-icon="download"></span>保存结果</a></div>
+      <div class="canvas-card" id="dropZone">
+        <div class="viewer-toolbar"><div class="view-switch" role="group" aria-label="预览模式"><button data-view="original" class="active" aria-pressed="true">原图</button><button data-view="result" disabled aria-pressed="false">处理结果</button><button data-view="compare" disabled aria-pressed="false"><span data-icon="compare"></span>滑动对比</button></div><div class="zoom-tools"><button class="icon-button" id="zoomOut" aria-label="缩小" title="缩小" disabled><span data-icon="minus"></span></button><label class="sr-only" for="zoomSelect">缩放比例</label><select id="zoomSelect" aria-label="缩放比例" disabled><option value="fit">适应窗口</option><option value="0.5">50%</option><option value="1">100%</option><option value="2">200%</option><option value="4">400%</option></select><button class="icon-button" id="zoomIn" aria-label="放大" title="放大" disabled><span data-icon="plus"></span></button></div></div>
+        <div class="canvas-viewport" id="viewport" tabindex="0" aria-label="图片画布，可拖动平移">
+          <div class="empty-state" id="emptyState"><div class="empty-visual"><div class="empty-orbit"></div><svg viewBox="0 0 80 80" aria-hidden="true"><rect x="14" y="17" width="52" height="46" rx="7"/><circle cx="49" cy="31" r="5"/><path d="m18 55 15-17 11 12 7-7 13 13"/><path class="empty-spark" d="M67 7v12M61 13h12"/></svg></div><h2>把图片放到这里</h2><p>拖入图片，或从电脑中选择文件</p><button class="button button-empty" id="emptyImportButton" disabled><span data-icon="folder"></span>选择图片</button><span class="format-note">PNG · JPG · WebP · BMP · TIFF</span><div class="empty-footnote"><span data-icon="lock"></span>图片在本机处理，原图始终保留</div></div>
+          <div class="image-scroll-content" id="imageContent" hidden><div class="image-frame" id="imageFrame"><img class="preview-image result-image" id="resultImage" alt="处理后的图片" draggable="false"><img class="preview-image source-image" id="sourceImage" alt="原始图片" draggable="false"><span class="image-label source-label" id="sourceLabel">原图</span><span class="image-label result-label" id="resultLabel">处理后</span><div class="split-handle" id="splitHandle" role="slider" tabindex="0" aria-label="原图与结果分割位置" aria-valuemin="0" aria-valuemax="100" aria-valuenow="50"><span><svg viewBox="0 0 24 24"><path d="m8 8-4 4 4 4m8-8 4 4-4 4"/></svg></span></div></div></div>
+          <div class="drag-overlay" id="dragOverlay" hidden><span data-icon="upload"></span><strong>松开鼠标，添加图片</strong><span>导入后由你决定何时开始处理</span></div>
+        </div>
+        <div class="canvas-status"><span id="viewStatus"><span class="quiet-dot"></span>等待导入</span><span id="staleStatus" hidden><span data-icon="clock"></span>参数已修改，当前显示上次结果</span><span class="canvas-help" id="canvasHelp">支持拖入多张图片</span></div>
+        <div class="compare-controls" id="compareControls" hidden><span>原图</span><label class="sr-only" for="compareRange">对比分割位置</label><input type="range" id="compareRange" min="0" max="100" value="50"><span>处理后</span></div>
+      </div>
+      <div class="queue-heading"><h3>图片队列 <span id="queueCount">0</span></h3><div><span id="queueSummary">还没有图片</span><button class="text-button" id="cancelAllButton" hidden>取消全部任务</button><button class="icon-button queue-add" id="queueImportButton" aria-label="添加更多图片" title="添加更多图片" disabled><span data-icon="plus"></span></button></div></div>
+      <div class="image-queue" id="imageQueue"><div class="queue-empty"><span data-icon="layers"></span>导入的图片会显示在这里，可逐张调整参数</div></div>
+    </section>
+
+    <aside class="status-panel" aria-label="处理进度与硬件状态">
+      <section class="task-card"><div class="status-section-title"><h2>当前任务</h2><span class="status-pill" id="taskPill">待开始</span></div><div class="task-stage-icon" id="taskStageIcon"><span data-icon="sparkle"></span></div><h3 id="taskStage">准备好，再开始</h3><p id="taskDetail">导入图片，选好处理方式后点击“处理当前图片”。</p><div class="progress-meta"><span id="taskElapsed">尚未运行</span><strong id="taskPercent">—</strong></div><div class="progress-track" role="progressbar" id="taskProgress" aria-label="处理进度" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><div id="taskProgressFill"></div></div><div class="task-bottom"><span id="taskDevice">设备将在开始后显示</span><button class="text-button danger" id="cancelButton" hidden>取消</button></div><div class="task-error" id="taskError" role="alert" hidden></div></section>
+      <section class="hardware-card"><div class="status-section-title"><h2>硬件状态</h2><span class="live-label" id="hardwareLive"><i></i>等待数据</span></div><div class="hardware-metric"><div class="metric-label"><span>CPU 使用率</span><strong id="cpuUsage">—</strong></div><div class="mini-meter"><span id="cpuMeter"></span></div></div><div class="hardware-metric"><div class="metric-label"><span>系统内存</span><strong id="ramUsage">—</strong></div><div class="mini-meter"><span id="ramMeter"></span></div><small id="ramTotal">正在读取硬件信息</small></div><div class="gpu-box"><span class="gpu-icon" data-icon="chip"></span><div><span class="eyebrow">GRAPHICS</span><h3 id="gpuName">正在检测显卡</h3></div></div><div class="gpu-readings"><div><span>GPU 负载</span><strong id="gpuUsage">—</strong></div><div><span>温度</span><strong id="gpuTemp">—</strong></div></div><div class="hardware-metric"><div class="metric-label"><span>显存</span><strong id="vramUsage">—</strong></div><div class="mini-meter"><span id="vramMeter"></span></div><small id="vramTotal">—</small></div><p class="hardware-note" id="hardwareNote">读取本机状态，不代表单个任务占用。</p></section>
+      <section class="output-card"><span data-icon="folder"></span><div><h3>处理结果自动保存</h3><p id="outputDirectory" title="">正在读取保存位置</p></div></section>
+      <div class="local-footer"><span data-icon="shield"></span><span>本地处理 · 无需 API 密钥</span><span class="version" id="appVersion"></span></div>
+    </aside>
+  </main>
+  <input type="file" id="fileInput" accept="image/*,.tif,.tiff,.avif,.tga" multiple hidden>
+  <dialog class="shutdown-dialog" id="shutdownDialog" aria-labelledby="shutdownTitle" aria-describedby="shutdownDetail">
+    <span class="dialog-icon" data-icon="power"></span>
+    <h2 id="shutdownTitle">退出澄图？</h2>
+    <p id="shutdownDetail">已保存的结果会保留，再次使用时请重新运行启动器。</p>
+    <p class="task-error" id="shutdownError" role="alert" hidden></p>
+    <div class="dialog-actions"><button class="button button-secondary" id="cancelShutdown" autofocus>继续使用</button><button class="button button-dark" id="confirmShutdown">退出程序</button></div>
+  </dialog>
+  <div class="toast-stack" id="toastStack" aria-live="polite"></div>
+  <div class="connection-error" id="connectionError" hidden role="alert"><strong>未能连接本地处理程序</strong><span id="connectionErrorDetail">请确认启动器仍在运行。</span><button class="button button-secondary" id="retryConnection">重新连接</button></div>
+</body>
+</html>
