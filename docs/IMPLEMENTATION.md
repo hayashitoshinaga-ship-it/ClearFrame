@@ -13,10 +13,14 @@ Local derivative of CXP-2024/gpt-anime-denoise at a5005a82f70d1d7c79145968c7c649
 `studio.engine.process_image(source_path, output_path, settings, progress, cancelled)` returns JSON-serializable metadata including actual_device, applied_stages, duration_seconds. Settings: mode, method, strength 0..100, device auto/cpu/cuda, stages (array of stage IDs, custom only). `progress(percent,stage,detail=None)` reports real stage/iteration boundaries with monotonic percentage. `cancelled()` bool. Raise `ProcessingCancelled` on cancel, `ValueError` invalid inputs. Source never overwritten. Model dir is project/.models via CLEARFRAME_MODELS environment variable. Use upstream denoise core for anime processing, cautious OpenCV NLM for photo processing, optional restrained sharpen. Preserve source size and alpha; keep RGB ICC where possible. No torch import at app startup if avoidable; import lazily for processing. Photo pipeline can run on CPU without torch. Strength zero produces exact pixel identity.
 
 ## HTTP contract
-- GET /api/config -> config above plus {app_name,version,output_dir}.
+- GET /api/config -> config above plus {app_name,version,output_dir,output_default_dir,output_warning}. Optional warning explains fallback when a persisted custom directory is unavailable.
+- POST /api/output JSON {path:absolutePath} -> {output_dir}; empty path resets to root/results. Persist preference under runtime; snapshot output directory at job submission.
+- POST /api/output/open -> {ok:true,path}; open the current output directory with the OS, without shell interpolation.
+- POST /api/exports JSON {image_ids:[currentQueueIds]} -> 201 {export_id,path,count,skipped:[imageIds]}; copy each image's latest successful result pair into an independent timestamped folder under current output. Existing results are immutable.
+- POST /api/exports/<id>/open -> {ok:true,path}; only registered export folders may be opened.
 - POST /api/images?name=<filename>, body raw image bytes -> {id,name,width,height,source_url,has_alpha}. Import NEVER starts processing.
 - POST /api/jobs JSON {image_id,mode,method,strength,device,stages} -> {id,image_id,status:"queued"}.
-- GET /api/jobs/<id> -> {id,image_id,status,progress,stage,detail,elapsed_seconds,actual_device,result_url,download_url,error,settings}. Status queued/running/completed/failed/cancelled. null URLs until completed.
+- GET /api/jobs/<id> -> {id,image_id,status,progress,stage,detail,elapsed_seconds,actual_device,result_url,download_url,result_name,error,settings}. Status queued/running/completed/failed/cancelled. null URLs/name until completed.
 - POST /api/jobs/<id>/cancel -> {ok:true}.
 - GET /api/images/<id>/source -> normalized PNG.
 - GET /api/jobs/<id>/result[?download=1] -> PNG.

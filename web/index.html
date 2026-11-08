@@ -44,18 +44,39 @@
         <div class="canvas-status"><span id="viewStatus"><span class="quiet-dot"></span>等待导入</span><span id="staleStatus" hidden><span data-icon="clock"></span>参数已修改，当前显示上次结果</span><span class="canvas-help" id="canvasHelp">支持拖入多张图片</span></div>
         <div class="compare-controls" id="compareControls" hidden><span>原图</span><label class="sr-only" for="compareRange">对比分割位置</label><input type="range" id="compareRange" min="0" max="100" value="50"><span>处理后</span></div>
       </div>
-      <div class="queue-heading"><h3>图片队列 <span id="queueCount">0</span></h3><div><span id="queueSummary">还没有图片</span><button class="text-button" id="cancelAllButton" hidden>取消全部任务</button><button class="icon-button queue-add" id="queueImportButton" aria-label="添加更多图片" title="添加更多图片" disabled><span data-icon="plus"></span></button></div></div>
+      <div class="queue-heading"><h3>图片队列 <span id="queueCount">0</span></h3><div><span id="queueSummary">还没有图片</span><button class="button button-secondary export-button" id="exportButton" title="每张图片导出最近一次成功结果；重新处理中的图片使用上次成功结果" disabled><span data-icon="download"></span><span id="exportButtonText">一键导出最新结果（0）</span></button><button class="text-button" id="cancelAllButton" hidden>取消全部任务</button><button class="icon-button queue-add" id="queueImportButton" aria-label="添加更多图片" title="添加更多图片" disabled><span data-icon="plus"></span></button></div></div>
       <div class="image-queue" id="imageQueue"><div class="queue-empty"><span data-icon="layers"></span>导入的图片会显示在这里，可逐张调整参数</div></div>
     </section>
 
     <aside class="status-panel" aria-label="处理进度与硬件状态">
       <section class="task-card"><div class="status-section-title"><h2>当前任务</h2><span class="status-pill" id="taskPill">待开始</span></div><div class="task-stage-icon" id="taskStageIcon"><span data-icon="sparkle"></span></div><h3 id="taskStage">准备好，再开始</h3><p id="taskDetail">导入图片，选好处理方式后点击“处理当前图片”。</p><div class="progress-meta"><span id="taskElapsed">尚未运行</span><strong id="taskPercent">—</strong></div><div class="progress-track" role="progressbar" id="taskProgress" aria-label="处理进度" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><div id="taskProgressFill"></div></div><div class="task-bottom"><span id="taskDevice">设备将在开始后显示</span><button class="text-button danger" id="cancelButton" hidden>取消</button></div><div class="task-error" id="taskError" role="alert" hidden></div></section>
+      <section class="output-card"><span data-icon="folder"></span><div><h3>自动保存位置</h3><p id="outputDirectory" title="">正在读取保存位置</p><div class="output-actions"><button class="button button-secondary" id="openOutputButton" disabled><span data-icon="folder"></span>打开文件夹</button><button class="text-button" id="changeOutputButton" disabled>更改位置</button></div></div></section>
       <section class="hardware-card"><div class="status-section-title"><h2>硬件状态</h2><span class="live-label" id="hardwareLive"><i></i>等待数据</span></div><div class="hardware-metric"><div class="metric-label"><span>CPU 使用率</span><strong id="cpuUsage">—</strong></div><div class="mini-meter"><span id="cpuMeter"></span></div></div><div class="hardware-metric"><div class="metric-label"><span>系统内存</span><strong id="ramUsage">—</strong></div><div class="mini-meter"><span id="ramMeter"></span></div><small id="ramTotal">正在读取硬件信息</small></div><div class="gpu-box"><span class="gpu-icon" data-icon="chip"></span><div><span class="eyebrow">GRAPHICS</span><h3 id="gpuName">正在检测显卡</h3></div></div><div class="gpu-readings"><div><span>GPU 负载</span><strong id="gpuUsage">—</strong></div><div><span>温度</span><strong id="gpuTemp">—</strong></div></div><div class="hardware-metric"><div class="metric-label"><span>显存</span><strong id="vramUsage">—</strong></div><div class="mini-meter"><span id="vramMeter"></span></div><small id="vramTotal">—</small></div><p class="hardware-note" id="hardwareNote">读取本机状态，不代表单个任务占用。</p></section>
-      <section class="output-card"><span data-icon="folder"></span><div><h3>处理结果自动保存</h3><p id="outputDirectory" title="">正在读取保存位置</p></div></section>
       <div class="local-footer"><span data-icon="shield"></span><span>本地处理 · 无需 API 密钥</span><span class="version" id="appVersion"></span></div>
     </aside>
   </main>
   <input type="file" id="fileInput" accept="image/*,.tif,.tiff,.avif,.tga" multiple hidden>
+  <dialog class="shutdown-dialog output-dialog" id="outputDialog" aria-labelledby="outputTitle" aria-describedby="outputHint">
+    <span class="dialog-icon" data-icon="folder"></span>
+    <h2 id="outputTitle">更改自动保存位置</h2>
+    <p id="outputHint">更改仅对新提交的任务生效，已提交任务仍使用原保存位置。</p>
+    <form id="outputForm">
+      <label class="dialog-label" for="outputPath">保存目录的绝对路径</label>
+      <input class="path-input" id="outputPath" type="text" autocomplete="off" spellcheck="false" placeholder="粘贴绝对目录，留空恢复默认" aria-describedby="outputDefaultHint" autofocus>
+      <p class="dialog-help" id="outputDefaultHint">默认位置：<span id="outputDefaultDirectory"></span></p>
+      <p class="task-error" id="outputError" role="alert" hidden></p>
+      <div class="dialog-actions output-dialog-actions"><button class="text-button" id="resetOutputButton" type="button">恢复默认</button><button class="button button-secondary" id="cancelOutputButton" type="button">取消</button><button class="button button-primary" id="saveOutputButton" type="submit">保存位置</button></div>
+    </form>
+  </dialog>
+  <dialog class="shutdown-dialog export-dialog" id="exportDialog" aria-labelledby="exportTitle" aria-describedby="exportDescription">
+    <span class="dialog-icon" data-icon="check"></span>
+    <h2 id="exportTitle">最新结果已导出</h2>
+    <p id="exportDescription">每张图片保留最近一次成功结果；重新处理中的图片使用上次成功结果。</p>
+    <div class="export-counts"><div><span>已导出</span><strong id="exportCount">—</strong></div><div><span>跳过无结果图片</span><strong id="exportSkipped">—</strong></div></div>
+    <div class="export-location"><span>导出目录</span><p id="exportDirectory"></p></div>
+    <p class="task-error" id="exportError" role="alert" hidden></p>
+    <div class="dialog-actions"><button class="button button-secondary" id="closeExportButton" autofocus>完成</button><button class="button button-primary" id="openExportButton"><span data-icon="folder"></span><span id="openExportText">打开文件夹</span></button></div>
+  </dialog>
   <dialog class="shutdown-dialog" id="shutdownDialog" aria-labelledby="shutdownTitle" aria-describedby="shutdownDetail">
     <span class="dialog-icon" data-icon="power"></span>
     <h2 id="shutdownTitle">退出澄图？</h2>

@@ -22,19 +22,12 @@ from PIL import Image, ImageCms, ImageOps, UnidentifiedImageError
 
 from . import __version__
 from .hardware import HardwareMonitor
+from .storage import OutputPreferences, export_snapshots, open_directory, publish_result, result_stem, result_workspace, safe_stem
 
 ROOT = Path(__file__).resolve().parent.parent
 MAX_BYTES = 80 * 1024 * 1024
 MAX_PIXELS = 16_777_216
 Image.MAX_IMAGE_PIXELS = MAX_PIXELS
-
-
-def safe_stem(name):
-    # Strip separators on either platform, avoid reserved Windows device names.
-    stem = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", Path(name).stem).strip(" .")[:80]
-    if not stem or re.fullmatch(r"(?i)(con|prn|aux|nul|com\d|lpt\d)", stem):
-        stem = "image"
-    return stem
 
 
 def normalise_image(data, destination):
@@ -87,15 +80,16 @@ def normalise_image(data, destination):
 
 class StudioState:
     def __init__(self, root=ROOT, runtime=None, output=None, processor=None, monitor=True):
-        self.root = Path(root)
-        self.runtime = Path(runtime or self.root / ".runtime")
-        self.output = Path(output or os.environ.get("CLEARFRAME_OUTPUT", self.root / "results"))
+        self.root = Path(root).resolve()
+        self.runtime = Path(runtime or self.root / ".runtime").resolve()
         self.imports = self.runtime / "imports"
         self.imports.mkdir(parents=True, exist_ok=True)
-        self.output.mkdir(parents=True, exist_ok=True)
+        self.output_preferences = OutputPreferences(self.root, self.runtime, explicit=output)
+        self.output = self.output_preferences.current
+        self.output_default = self.output_preferences.default
         self.token = secrets.token_urlsafe(32)
         self.lock = threading.RLock()
-        self.images, self.jobs = {}, {}
+        self.images, self.jobs, self.exports = {}, {}, {}
         self.work = queue.Queue()
         self.stopping = threading.Event()
         self.active_job_id = None
@@ -120,11 +114,64 @@ class StudioState:
             self.images[identity] = image
         return {k: v for k, v in image.items() if k != "path"}
 
+    def set_output(self, payload):
+        if not isinstance(payload, dict) or "path" not in payload:
+            raise ValueError("请提供输出文件夹的绝对路径；留空可恢复默认文件夹。")
+        with self.lock:
+            selected = self.output_preferences.set(payload["path"])
+            self.output = selected
+            return {"output_dir": str(selected)}
+
+    def open_output(self):
+        with self.lock:
+            path = self.output
+        return open_directory(path)
+
+    def export_queue(self, payload):
+        if not isinstance(payload, dict) or not isinstance(payload.get("image_ids"), list):
+            raise ValueError("请提供需要导出的队列图片列表。")
+        requested = payload["image_ids"]
+        if not requested or any(not isinstance(identity, str) for identity in requested):
+            raise ValueError("导出队列为空或包含无效图片，请先添加并处理图片。")
+        # Duplicates are harmless: preserve first occurrence and queue order.
+        image_ids = list(dict.fromkeys(requested))
+        with self.lock:
+            if any(identity not in self.images for identity in image_ids):
+                raise ValueError("导出列表中有不存在的图片，请刷新队列后重试。")
+            directory = self.output
+            snapshots, skipped = [], []
+            for identity in image_ids:
+                completed = [job for job in self.jobs.values() if job["image_id"] == identity and job["status"] == "completed"]
+                latest = max(completed, key=lambda job: (job["finished"] or job["started"] or job["created"]), default=None)
+                png = latest["result_path"] if latest else None
+                if not png or not png.is_file() or not png.with_suffix(".json").is_file():
+                    skipped.append(identity)
+                    continue
+                snapshots.append({"image_id": identity, "png": png, "json": png.with_suffix(".json")})
+        if not snapshots:
+            raise ValueError("队列中没有可导出的成功结果，请先完成处理；已删除的结果需要重新生成。")
+        path = export_snapshots(directory, snapshots)
+        export_id = uuid.uuid4().hex
+        result = {"export_id": export_id, "path": str(path), "count": len(snapshots), "skipped": skipped}
+        with self.lock:
+            self.exports[export_id] = dict(result)
+        return result
+
+    def open_export(self, identity):
+        with self.lock:
+            record = self.exports.get(identity)
+            if record is None:
+                raise KeyError(identity)
+            path = record["path"]
+        return open_directory(path)
+
     def create_job(self, payload):
         from .engine import validate_settings
         if not isinstance(payload, dict):
             raise ValueError("任务设置必须是对象。")
         image_id = payload.get("image_id")
+        if not isinstance(image_id, str):
+            raise ValueError("图片不存在，请重新导入。")
         with self.lock:
             if image_id not in self.images:
                 raise ValueError("图片不存在，请重新导入。")
@@ -135,7 +182,8 @@ class StudioState:
         with self.lock:
             job = dict(id=identity, image_id=image_id, status="queued", progress=0, stage="等待处理",
                        detail=None, actual_device=None, error=None, settings=settings, created=time.time(),
-                       started=None, finished=None, result_url=None, download_url=None,
+                       started=None, finished=None, result_url=None, download_url=None, result_name=None,
+                       output_dir=str(self.output),
                        cancel=threading.Event(), result_path=None, metadata=None)
             self.jobs[identity] = job
             self.work.put(identity)
@@ -176,8 +224,6 @@ class StudioState:
                 image = self.images[job["image_id"]]
                 job.update(status="running", started=time.time(), stage="准备处理")
                 self.active_job_id = identity
-            path = self.output / (safe_stem(image["name"]) + "_clearframe_" + identity[:10] + ".png")
-
             def progress(percent, stage, detail=None):
                 with self.lock:
                     job["progress"] = max(job["progress"], min(99.9, float(percent)))
@@ -192,25 +238,27 @@ class StudioState:
             try:
                 from .engine import process_image, ProcessingCancelled
                 runner = self.processor or process_image
-                metadata = runner(image["path"], path, job["settings"], progress, job["cancel"].is_set)
-                if job["cancel"].is_set():
-                    raise ProcessingCancelled("已取消")
-                if not path.is_file():
-                    raise RuntimeError("处理器未生成结果文件。")
-                receipt = dict(app="ClearFrame", version=__version__, source_name=image["name"],
-                               settings=job["settings"], metadata=metadata,
-                               result_name=path.name, completed_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()))
-                path.with_suffix(".json").write_text(json.dumps(receipt, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
-                with self.lock:
-                    job.update(status="completed", progress=100, stage="处理完成", detail=None,
-                               actual_device=metadata.get("actual_device", job["actual_device"]),
-                               metadata=metadata, result_path=path,
-                               result_url=f"/api/jobs/{identity}/result",
-                               download_url=f"/api/jobs/{identity}/result?download=1")
+                with result_workspace(job["output_dir"]) as temporary:
+                    metadata = runner(image["path"], temporary, job["settings"], progress, job["cancel"].is_set)
+                    if job["cancel"].is_set():
+                        raise ProcessingCancelled("已取消")
+                    if not temporary.is_file():
+                        raise RuntimeError("处理器未生成结果文件。")
+                    receipt = dict(app="ClearFrame", version=__version__, source_name=image["name"],
+                                   settings=job["settings"], metadata=metadata,
+                                   completed_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()))
+                    # Cancellation, publication and completed status share one
+                    # lock, so a late cancel cannot hide a successful file pair.
+                    with self.lock:
+                        path, receipt = publish_result(temporary, job["output_dir"], result_stem(image["name"], job["settings"]), receipt, job["cancel"].is_set)
+                        metadata = receipt["metadata"]
+                        job.update(status="completed", progress=100, stage="处理完成", detail=None,
+                                   actual_device=metadata.get("actual_device", job["actual_device"]),
+                                   metadata=metadata, result_path=path, result_name=path.name, finished=time.time(),
+                                   result_url=f"/api/jobs/{identity}/result",
+                                   download_url=f"/api/jobs/{identity}/result?download=1")
             except Exception as exc:
                 cancelled = job["cancel"].is_set() or type(exc).__name__ == "ProcessingCancelled"
-                path.unlink(missing_ok=True)
-                path.with_suffix(".json").unlink(missing_ok=True)
                 with self.lock:
                     job.update(status="cancelled" if cancelled else "failed",
                                stage="已取消" if cancelled else "处理失败",
@@ -219,7 +267,8 @@ class StudioState:
                     traceback.print_exc()
             finally:
                 with self.lock:
-                    job["finished"] = time.time()
+                    if job["finished"] is None:
+                        job["finished"] = time.time()
                     self.active_job_id = None
                 self.work.task_done()
 
@@ -316,7 +365,8 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/config":
                 from .presets import get_config
                 config = get_config()
-                config.update(app_name="澄图 ClearFrame", version=__version__, output_dir=str(self.state.output))
+                with self.state.lock:
+                    config.update(app_name="澄图 ClearFrame", version=__version__, output_dir=str(self.state.output), output_default_dir=str(self.state.output_default), output_warning=self.state.output_preferences.warning)
                 return self.json(config)
             if path == "/api/hardware":
                 return self.json(self.state.hardware_snapshot())
@@ -353,6 +403,15 @@ class Handler(BaseHTTPRequestHandler):
                 return self.json(self.state.import_image(self.body(), name), 201)
             if route.path == "/api/jobs":
                 return self.json(self.state.create_job(json.loads(self.body(64 * 1024))), 202)
+            if route.path == "/api/output":
+                return self.json(self.state.set_output(json.loads(self.body(64 * 1024))))
+            if route.path == "/api/output/open":
+                return self.json(self.state.open_output())
+            if route.path == "/api/exports":
+                return self.json(self.state.export_queue(json.loads(self.body(64 * 1024))), 201)
+            export = re.fullmatch(r"/api/exports/([0-9a-f]{32})/open", route.path)
+            if export:
+                return self.json(self.state.open_export(export[1]))
             match = re.fullmatch(r"/api/jobs/([0-9a-f]{32})/cancel", route.path)
             if match:
                 return self.json(self.state.cancel_job(match[1]))
@@ -365,7 +424,7 @@ class Handler(BaseHTTPRequestHandler):
         except (ValueError, UnidentifiedImageError, Image.DecompressionBombError) as exc:
             return self.json({"error": str(exc)[:500]}, 400)
         except KeyError:
-            return self.json({"error": "任务不存在。"}, 404)
+            return self.json({"error": "任务或导出记录不存在。"}, 404)
         except Exception as exc:
             return self.json({"error": str(exc)[:500]}, 500)
 

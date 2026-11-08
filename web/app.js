@@ -24,7 +24,7 @@
   };
   const icon = (name, extra = '') => `<svg viewBox="0 0 24 24" aria-hidden="true" class="${extra}">${paths[name] || paths.image}</svg>`;
   function hydrateIcons(scope = document) { scope.querySelectorAll('[data-icon]').forEach(el => { el.innerHTML = icon(el.dataset.icon); }); }
-  const state = {config: null, draft: null, items: [], selectedId: null, view: 'original', zoom: 'fit', split: 50, scale: 1, connected: false, stopped: false, closing: false, shutdownWait: null, pendingFiles: [], importing: false, polling: false, hardwarePolling: false, batchStarting: false, batchCancelled: false, hardware: null};
+  const state = {config: null, draft: null, items: [], selectedId: null, view: 'original', zoom: 'fit', split: 50, scale: 1, connected: false, stopped: false, closing: false, shutdownWait: null, pendingFiles: [], importing: false, polling: false, hardwarePolling: false, batchStarting: false, batchCancelled: false, hardware: null, outputSaving: false, outputOpening: false, exporting: false, exportOpening: false, lastExport: null};
   const halted = () => state.stopped || state.closing;
   // Hold in-flight responses while shutdown is undecided. A failed shutdown can
   // resume the same requests; a successful shutdown discards their late results.
@@ -74,8 +74,8 @@
       state.config = config;
       state.draft ||= copy(state.config.defaults);
       setConnection(true); $('connectionError').hidden = true;
-      $('outputDirectory').textContent = state.config.output_dir || '项目 results 文件夹';
-      $('outputDirectory').title = state.config.output_dir || '';
+      renderOutputLocation();
+      if (state.config.output_warning) toast(state.config.output_warning, true);
       $('appVersion').textContent = `v${state.config.version || '1.0'}`;
       renderAll(); pollHardware(); pollJobs();
     } catch (error) {
@@ -123,7 +123,7 @@
     $('downloadButton').setAttribute('aria-disabled', String(!available));
     if (available) {
       $('downloadButton').href = item.lastResult.download_url || `${item.lastResult.result_url}?download=1`;
-      $('downloadButton').download = item.name.replace(/\.[^.]+$/, '') + '_clearframe.png';
+      $('downloadButton').download = item.lastResult.result_name || '';
     } else $('downloadButton').removeAttribute('href');
   }
   function renderActions() {
@@ -137,7 +137,24 @@
     $('cancelAllButton').hidden = state.stopped || !state.items.some(active);
     $('cancelAllButton').disabled = unavailable;
     if ($('shutdownButton')) $('shutdownButton').disabled = !state.connected || halted();
+    const exportable = state.items.filter(item => item.lastResult).length;
+    $('exportButton').disabled = unavailable || !exportable || state.exporting;
+    $('exportButtonText').textContent = state.exporting ? '正在导出…' : `一键导出最新结果（${exportable}）`;
+    $('openOutputButton').disabled = unavailable || state.outputOpening || state.outputSaving;
+    $('changeOutputButton').disabled = unavailable || state.outputSaving;
+    $('saveOutputButton').disabled = unavailable || state.outputSaving;
+    $('resetOutputButton').disabled = unavailable || state.outputSaving;
+    $('outputPath').disabled = unavailable || state.outputSaving;
+    $('cancelOutputButton').disabled = state.outputSaving;
+    $('saveOutputButton').textContent = state.outputSaving ? '正在保存…' : '保存位置';
+    $('openExportButton').disabled = unavailable || !state.lastExport || state.exportOpening;
+    $('openExportText').textContent = state.exportOpening ? '正在打开…' : '打开文件夹';
     renderDownload();
+  }
+  function renderOutputLocation() {
+    $('outputDirectory').textContent = state.config?.output_dir || '正在读取保存位置';
+    $('outputDirectory').title = state.config?.output_dir || '';
+    $('outputDefaultDirectory').textContent = state.config?.output_default_dir || '项目 results 文件夹';
   }
   let lastQueueRender = '';
   function renderQueue() {
@@ -183,7 +200,7 @@
     const titles = {ready: item ? '图片已就绪' : '准备好，再开始', submitting:'正在提交任务',queued:'等待处理',running:'正在处理',completed:'处理完成',failed:'处理未完成',cancelled:'任务已取消'};
     $('taskStage').textContent = state.stopped ? '本地服务已关闭' : job?.stage || titles[status];
     const defaults = {ready: item ? '选好处理方式与强度，然后手动开始。每张图片单独保存参数。' : '导入图片，选好处理方式后点击“处理当前图片”。',submitting:'正在把参数发送给本地处理程序。',queued:'当前只有一个处理任务运行，其余图片依次执行。',running:'正在执行本地处理步骤。',completed:'结果已保存。可切换预览模式，检查细节。',failed:'请查看下方原因，调整后可重新开始。',cancelled:'处理已停止，原图与上次完成的结果仍保留。'};
-    $('taskDetail').textContent = state.stopped ? '已完成的结果保存在 results 文件夹，再次使用请重新运行启动器。' : status === 'cancelled' ? '任务已取消，保留原图与上次结果。' : item?.cancelling || item?.cancelWhenSubmitted ? '正在请求取消，当前步骤结束后停止…' : job?.detail || defaults[status];
+    $('taskDetail').textContent = state.stopped ? '已完成的结果保留在处理时的保存位置，再次使用请重新运行启动器。' : status === 'cancelled' ? '任务已取消，保留原图与上次结果。' : item?.cancelling || item?.cancelWhenSubmitted ? '正在请求取消，当前步骤结束后停止…' : job?.detail || defaults[status];
     const progress = Number.isFinite(job?.progress) ? Math.min(100, Math.max(0, job.progress)) : 0;
     $('taskPercent').textContent = job ? `${Math.round(progress)}%` : '—';
     $('taskProgress').setAttribute('aria-valuenow', String(progress));
@@ -270,6 +287,12 @@
     state.selectedId = id; state.zoom = 'fit';
     if (selected().lastResult) state.view = 'compare'; else state.view = 'original';
     $('viewport').scrollTop = 0; $('viewport').scrollLeft = 0; renderAll();
+    const card = $('imageQueue').querySelector(`[data-image-id="${CSS.escape(id)}"]`);
+    if (card) {
+      const queueBounds = $('imageQueue').getBoundingClientRect(), cardBounds = card.getBoundingClientRect();
+      if (cardBounds.left < queueBounds.left) $('imageQueue').scrollLeft -= queueBounds.left - cardBounds.left + 2;
+      else if (cardBounds.right > queueBounds.right) $('imageQueue').scrollLeft += cardBounds.right - queueBounds.right + 2;
+    }
   }
   async function importFiles(files) {
     if (!state.connected || !state.config || halted()) return toast(state.stopped ? '本地服务已关闭，请重新运行启动器。' : '请先连接本地处理程序。', true);
@@ -286,7 +309,7 @@
         if (!(await mayUpdate())) break;
         const item = {...imported,settings:fileSettings,status:'ready',job:null,lastResult:null,localError:null};
         state.items.push(item); count++;
-        if (!state.selectedId) selectImage(item.id); else { renderQueue(); renderActions(); }
+        selectImage(item.id);
       } catch (error) { if (!(await mayUpdate())) break; toast(`${file.name || '图片'}：${error.message}`, true); }
     }
     state.importing = false; document.body.classList.remove('loading-import');
@@ -340,7 +363,7 @@
         item.pollError = null; item.job = {...item.job,...job}; item.status = job.status;
         if (!active(item)) item.cancelling = false;
         if (job.status === 'completed' && job.result_url && item.lastResult?.id !== job.id) {
-          item.lastResult = {id:job.id,result_url:job.result_url,download_url:job.download_url,settings:copy(job.settings || item.job.settings),elapsed_seconds:job.elapsed_seconds,actual_device:job.actual_device};
+          item.lastResult = {id:job.id,result_url:job.result_url,download_url:job.download_url,result_name:job.result_name,settings:copy(job.settings || item.job.settings),elapsed_seconds:job.elapsed_seconds,actual_device:job.actual_device};
           if (item.id === state.selectedId) { state.view = 'compare'; renderViewer(); }
           toast(`${item.name} 处理完成，用时 ${niceTime(job.elapsed_seconds)}。`);
         }
@@ -382,6 +405,73 @@
       ['cpuMeter','ramMeter','vramMeter'].forEach(id => meter(id, null));
       $('hardwareNote').textContent = '硬件读数已暂停。正在尝试重新连接本地服务。';
     } finally { state.hardwarePolling = false; }
+  }
+  async function saveOutputPath(path) {
+    if (halted() || !state.connected || state.outputSaving) return;
+    state.outputSaving = true; $('outputError').hidden = true; renderActions();
+    try {
+      const result = await api('/api/output', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path})});
+      if (!(await mayUpdate())) return;
+      state.config.output_dir = result.output_dir;
+      state.config.output_warning = null;
+      renderOutputLocation(); $('outputDialog').close();
+      toast(path ? '保存位置已更新，对新提交的任务生效。' : '已恢复默认保存位置，对新提交的任务生效。');
+    } catch (error) {
+      if (!(await mayUpdate())) return;
+      $('outputError').textContent = error.message; $('outputError').hidden = false;
+    } finally {
+      state.outputSaving = false;
+      if (await mayUpdate()) renderActions();
+    }
+  }
+  async function openFolder(kind) {
+    const isExport = kind === 'export', busyKey = isExport ? 'exportOpening' : 'outputOpening';
+    if (halted() || !state.connected || state[busyKey] || (isExport && !state.lastExport)) return;
+    state[busyKey] = true;
+    if (isExport) $('exportError').hidden = true;
+    renderActions();
+    try {
+      const path = isExport ? `/api/exports/${encodeURIComponent(state.lastExport.export_id)}/open` : '/api/output/open';
+      await api(path, {method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});
+      if (!(await mayUpdate())) return;
+      if (!isExport) toast('已打开自动保存文件夹。');
+    } catch (error) {
+      if (!(await mayUpdate())) return;
+      if (isExport) { $('exportError').textContent = error.message; $('exportError').hidden = false; }
+      else toast(error.message, true);
+    } finally {
+      state[busyKey] = false;
+      if (await mayUpdate()) renderActions();
+    }
+  }
+  function showExportDialog() {
+    if (halted()) return;
+    const existing = document.querySelector('dialog[open]');
+    if (existing && existing !== $('exportDialog')) {
+      existing.addEventListener('close', showExportDialog, {once:true}); return;
+    }
+    if (!$('exportDialog').open) $('exportDialog').showModal();
+  }
+  async function exportLatest() {
+    if (halted() || !state.connected || state.exporting || !state.items.some(item => item.lastResult)) return;
+    const imageIds = state.items.map(item => item.id);
+    state.exporting = true; renderActions();
+    try {
+      const result = await api('/api/exports', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({image_ids:imageIds})});
+      if (!(await mayUpdate())) return;
+      state.lastExport = result;
+      $('exportCount').textContent = result.count;
+      $('exportSkipped').textContent = result.skipped.length;
+      $('exportDirectory').textContent = result.path;
+      $('exportError').hidden = true;
+      showExportDialog();
+    } catch (error) {
+      if (!(await mayUpdate())) return;
+      toast(`导出未完成：${error.message}`, true);
+    } finally {
+      state.exporting = false;
+      if (await mayUpdate()) renderActions();
+    }
   }
   function radioKeyboard(event) {
     if (!['ArrowRight','ArrowDown','ArrowLeft','ArrowUp','Home','End'].includes(event.key)) return;
@@ -484,6 +574,19 @@
     if (files.length) { event.preventDefault(); importFiles(files); }
   });
   $('downloadButton').addEventListener('click', event => { if (halted() || !state.connected || $('downloadButton').getAttribute('aria-disabled') === 'true') event.preventDefault(); });
+  $('openOutputButton').addEventListener('click', () => openFolder('output'));
+  $('changeOutputButton').addEventListener('click', () => {
+    if (halted() || !state.connected || state.outputSaving) return;
+    $('outputPath').value = state.config.output_dir || '';
+    $('outputError').hidden = true; renderOutputLocation(); $('outputDialog').showModal();
+  });
+  $('outputForm').addEventListener('submit', event => { event.preventDefault(); saveOutputPath($('outputPath').value.trim()); });
+  $('resetOutputButton').addEventListener('click', () => saveOutputPath(''));
+  $('cancelOutputButton').addEventListener('click', () => $('outputDialog').close());
+  $('outputDialog').addEventListener('cancel', event => { if (state.outputSaving) event.preventDefault(); });
+  $('exportButton').addEventListener('click', exportLatest);
+  $('openExportButton').addEventListener('click', () => openFolder('export'));
+  $('closeExportButton').addEventListener('click', () => $('exportDialog').close());
   $('retryConnection').addEventListener('click', initialize);
   let shutdownPending = false;
   $('shutdownButton')?.addEventListener('click', () => {
@@ -510,7 +613,7 @@
       setConnection(false, '服务已关闭'); renderTask(); renderQueue();
       $('shutdownDialog').close();
       $('connectionError').hidden = false; $('connectionError').querySelector('strong').textContent = '本地服务已关闭';
-      $('connectionErrorDetail').textContent = '已完成的结果保存在 results 文件夹。再次使用请重新运行启动器并刷新页面。';
+      $('connectionErrorDetail').textContent = '已完成的结果保留在处理时的保存位置。再次使用请重新运行启动器并刷新页面。';
       $('retryConnection').hidden = true; $('hardwareLive').innerHTML = '<i></i>已停止'; $('hardwareLive').classList.remove('online');
       ['cpuUsage','ramUsage','gpuUsage','gpuTemp','vramUsage'].forEach(id => { $(id).textContent = '—'; });
       ['cpuMeter','ramMeter','vramMeter'].forEach(id => meter(id, null));

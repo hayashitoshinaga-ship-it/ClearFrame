@@ -9,7 +9,7 @@ import threading
 import time
 import unittest
 from unittest import mock
-from urllib.parse import quote
+from urllib.parse import quote, unquote
 
 import numpy as np
 from PIL import Image, ImageCms
@@ -50,7 +50,8 @@ class ControlledProcessor:
             raise ProcessingCancelled("测试任务已取消")
         shutil.copyfile(source, destination)
         progress(100, "测试处理完成", {"actual_device": "cpu"})
-        return {"actual_device": "cpu", "applied_stages": ["stub_copy"], "duration_seconds": .01}
+        return {"actual_device": "cpu", "applied_stages": ["stub_copy"], "duration_seconds": .01,
+                "output_path": str(destination)}
 
 
 class ServerIntegrationTests(unittest.TestCase):
@@ -176,6 +177,8 @@ class ServerIntegrationTests(unittest.TestCase):
         outputs = sorted(self.state.output.glob("*.png"))
         self.assertEqual(len(outputs), 2)
         self.assertNotEqual(outputs[0].name, outputs[1].name)
+        self.assertEqual({p.name for p in outputs}, {
+            "相同名称_实拍人像_默认_强度30.png", "相同名称_实拍人像_默认_强度30_02.png"})
         self.assertEqual(source.read_bytes(), original)
         self.assertEqual(len(self.processor.calls), 2)
         for job in completed:
@@ -187,6 +190,7 @@ class ServerIntegrationTests(unittest.TestCase):
             self.assertEqual(downloaded, original)
             self.assertEqual(headers["Content-Type"], "image/png")
             self.assertIn("attachment", headers["Content-Disposition"])
+            self.assertIn(job["result_name"], unquote(headers["Content-Disposition"]))
             self.assertNotIn("cancel", job)
             self.assertNotIn("result_path", job)
         for output in outputs:
@@ -196,7 +200,97 @@ class ServerIntegrationTests(unittest.TestCase):
             self.assertEqual(receipt["result_name"], output.name)
             self.assertEqual(receipt["settings"]["mode"], "photo_portrait")
             self.assertEqual(receipt["metadata"]["actual_device"], "cpu")
+            self.assertEqual(Path(receipt["metadata"]["output_path"]), output)
             self.assertTrue(receipt["completed_at"].endswith("Z"))
+
+    def test_output_change_persists_and_only_redirects_new_submissions(self):
+        old_output = self.state.output
+        image = self.import_image()
+        self.processor.block = True
+        first = self.submit(image)
+        self.assertTrue(self.processor.started.wait(2))
+        queued = self.submit(image)
+        new_output = self.folder / "自定义结果 空格"
+        status, response, _ = self.request("POST", "/api/output",
+            json.dumps({"path": str(new_output)}).encode())
+        self.assertEqual(status, 200, response)
+        self.assertEqual(Path(response["output_dir"]), new_output)
+        status, config, _ = self.request("GET", "/api/config")
+        self.assertEqual(Path(config["output_dir"]), new_output)
+        self.assertEqual(Path(config["output_default_dir"]), ROOT / "results")
+        newer = self.submit(image)
+        self.processor.release.set()
+        for job in (first, queued, newer):
+            result = self.wait_job(job["id"], {"completed"})
+            self.assertEqual(self.request("GET", result["download_url"])[0], 200)
+        destinations = [self.state.jobs[job["id"]]["result_path"].parent for job in (first, queued, newer)]
+        self.assertEqual(destinations, [old_output, old_output, new_output])
+        restored = StudioState(root=self.folder, runtime=self.state.runtime, monitor=False)
+        try:
+            self.assertEqual(restored.output, new_output)
+        finally:
+            restored.close()
+            restored.worker.join(timeout=3)
+
+    def test_output_rejects_invalid_paths_and_protects_new_write_routes(self):
+        before = self.state.output
+        plain_file = self.folder / "not-a-folder.txt"
+        plain_file.write_text("keep", encoding="utf-8")
+        for value in ("relative/path", str(plain_file), 123, None):
+            with self.subTest(value=value):
+                status, response, _ = self.request("POST", "/api/output",
+                    json.dumps({"path": value}).encode())
+                self.assertEqual(status, 400, response)
+                self.assertEqual(self.state.output, before)
+        for route, payload in (("/api/output", {"path": str(self.folder / "denied")}),
+                               ("/api/output/open", {}),
+                               ("/api/exports", {"image_ids": []}),
+                               ("/api/exports/" + "a" * 32 + "/open", {})):
+            self.assertEqual(self.request("POST", route, json.dumps(payload).encode(), auth=False)[0], 403)
+        self.assertFalse((self.folder / "denied").exists())
+        self.assertEqual(plain_file.read_text(), "keep")
+
+    def test_export_uses_latest_success_even_during_rerun_and_keeps_originals(self):
+        a = self.import_image(name="同名.png")
+        b = self.import_image(name="同名.png")
+        pending = self.import_image(name="尚未处理.png")
+        old = self.wait_job(self.submit(a, strength=10)["id"], {"completed"})
+        latest = self.wait_job(self.submit(a, strength=20)["id"], {"completed"})
+        other = self.wait_job(self.submit(b, strength=20)["id"], {"completed"})
+        originals = {p.name: p.read_bytes() for p in self.state.output.glob("*") if p.is_file()}
+        self.processor.block = True
+        self.processor.started.clear()
+        running = self.submit(a, strength=90)
+        self.assertTrue(self.processor.started.wait(2))
+        export_body = json.dumps({"image_ids": [a["id"], b["id"], pending["id"]]}).encode()
+        status, response, _ = self.request("POST", "/api/exports", export_body)
+        self.assertEqual(status, 201, response)
+        folder = Path(response["path"])
+        self.assertEqual(folder.parent, self.state.output)
+        self.assertTrue(folder.name.startswith("队列导出_"))
+        self.assertEqual(response["count"], 2)
+        self.assertEqual(response["skipped"], [pending["id"]])
+        self.assertEqual({p.name for p in folder.glob("*.png")}, {latest["result_name"], other["result_name"]})
+        self.assertFalse((folder / old["result_name"]).exists())
+        for filename in (latest["result_name"], other["result_name"]):
+            self.assertEqual((folder / filename).read_bytes(), originals[filename])
+            receipt = Path(filename).with_suffix(".json").name
+            self.assertEqual((folder / receipt).read_bytes(), originals[receipt])
+        status, repeated, _ = self.request("POST", "/api/exports", export_body)
+        self.assertEqual(status, 201, repeated)
+        self.assertNotEqual(repeated["path"], str(folder))
+        for name, content in originals.items():
+            self.assertEqual((self.state.output / name).read_bytes(), content)
+        self.request("POST", f"/api/jobs/{running['id']}/cancel")
+        self.wait_job(running["id"], {"cancelled"})
+
+    def test_export_rejects_unknown_or_empty_queue_without_creating_folders(self):
+        image = self.import_image()
+        for payload in ({"image_ids": []}, {"image_ids": ["a" * 32]},
+                        {"image_ids": [image["id"]]}, {"image_ids": "not-a-list"}):
+            status, response, _ = self.request("POST", "/api/exports", json.dumps(payload).encode())
+            self.assertEqual(status, 400, response)
+        self.assertEqual(list(self.state.output.iterdir()), [])
 
     def test_cancel_running_task_removes_partial_output(self):
         self.processor.block = True
